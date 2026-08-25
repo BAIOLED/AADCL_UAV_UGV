@@ -1,0 +1,42 @@
+input_cloud: /cloud_registered
+input_odom: /Odometry
+static_scan_topic: /scout/static_scan
+static_map_topic: /scout/static_map_cloud
+dynamic_topic: /scout/dynamic_points
+
+# The input is already deskewed and registered by FAST-LIO. These filters only
+# affect the exported map; they never feed points back into FAST-LIO.
+min_range: 0.50
+max_range: 50.0
+scan_voxel_size: 0.10
+
+radius_filter:
+  enable: true
+  radius: 0.20
+  min_neighbors: 2
+
+# Coordinates are in the FAST-LIO body frame obtained from /Odometry.
+# Measure these limits on the real robot before enabling this filter.
+self_filter:
+  enable: false
+  min_x: -0.55
+  max_x: 0.55
+  min_y: -0.45
+  max_y: 0.45
+  min_z: -0.40
+  max_z: 0.25
+
+dynamic_filter:
+  enable: true
+  voxel_size: 0.20
+  confirm_hits: 5
+  candidate_timeout: 3.0
+  cleanup_period: 1.0
+  max_voxels: 2000000
+
+map_publish_period: 2.0
+publish_dynamic_points: false
+max_odom_age: 0.20
+
+# May be overridden by pointcloud_mapper.launch.
+output_path: /tmp/filtered_camera_init.pcd
