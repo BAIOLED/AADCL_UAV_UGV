@@ -122,3 +122,27 @@ D435i当前提供RGB、Depth和相机TF，不作为FAST-LIO/NDT输入。默认�
 | NDT不收敛 | 地图名、初值、实时点云、外参 |
 | future extrapolation | `map → odom`时间戳和localizer参数 |
 | 有路径但车不动 | `/cmd_vel`、CAN、急停/遥控状态 |
+
+## 8. 导航测试日志
+
+日志不会修改导航参数。先启动定位和导航，再开日志：
+
+```bash
+roslaunch scout_navigation nav_logging.launch tag:=factory_a_teb_01
+```
+
+完成测试后在日志终端按`Ctrl+C`，脚本会正常结束rosbag并自动分析。结果位于：
+
+```bash
+cat ~/livox_fastlio/logs/navigation/LAST_RUN
+RUN_DIR=$(cat ~/livox_fastlio/logs/navigation/LAST_RUN)
+cat "$RUN_DIR/summary.txt"
+```
+
+若没有`summary.txt`，检查目录中是否只有`.bag.active`、磁盘是否已满，以及`analysis_console.txt`。完整开发步骤、记录话题和CSV说明见《Scout Mini 自主导航机器人开发文档》第17.13.1节。
+
+## 9. 文档分工
+
+- 本手册：操作者启动、停止、保存和快速排错；
+- 《开发文档》：所有必需功能包逐文件开发、编译和验证；
+- 《启动文件、节点、话题、TF与常见问题完整表》：运行接口和诊断基准。

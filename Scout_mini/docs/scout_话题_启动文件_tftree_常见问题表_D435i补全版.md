@@ -1,599 +1,696 @@
-# Scout Mini ROS 系统信息表
+# Scout Mini 启动文件、节点、话题、TF与常见问题完整表
 
-> **2026-08-25 一键建图接口更新：** `scout_mapping.launch` 接收
-> `map_name`，并自动启动 `scout_pointcloud_mapper` 与
-> `scout_mapping_finisher`。mapper 输入 `/cloud_registered`、`/Odometry`，输出
-> `/scout/static_scan`、`/scout/static_map_cloud`，可选输出
-> `/scout/dynamic_points`；`/finish_mapping` 是正式完成接口，会依次调用底层
-> `/scout_pointcloud_mapper/save_map` 和 `finalize_map.py --replace-raw`。两个
-> 新节点都不发布 TF，也不向 FAST-LIO 回灌点云。必须等待 `/finish_mapping`
-> 返回 `success: True` 后再停止 launch。FAST-LIO 的 `pcd_save_en` 现为
-> `false`；下文相反描述属于旧版。
+> 本表按当前源码逐项整理。车端工作空间：`~/livox_fastlio`。
+> 正式建图入口：`scout_mapping.launch`；正式定位入口：`scout_localization.launch`；正式导航入口：`navigation_teb.launch`。
+> 导航当前工作正常，本表只记录现状，不要求修改navigation参数。
 
-> 适用范围：当前 `livox_fastlio` ROS1 工作区，Mid-360 + FAST-LIO + Scout Mini + PCD/NDT 重定位 + move_base/TEB，并包含独立 `realsense_ws` 中的 Intel RealSense D435i RGB/Depth/IMU 接入。
->
-> 本文依据本次提供的两份 `src` 源码整理。表中以**当前主链路实际引用关系**为准；源码中保留的上游示例、早期调试文件、DWA 回退方案和迁移补丁不作为当前正式运行链路。
+## 1. 工作模式与禁止同时启动项
 
----
-
-## 1. 当前正式运行链路
-
-### 1.1 建图
-
-```text
-Livox Mid-360
-    ↓ /livox/lidar + /livox/imu
-FAST-LIO
-    ↓ camera_init -> body
-TF Manager
-    ↓ odom -> camera_init
-    ↓ body -> base_link
-Pose Adapter
-    ↓ /fastlio_odom
-Scout Base
-    ↓ /scout/odom
-```
-
-推荐入口：
-
-```bash
-roslaunch scout_system_bringup scout_mapping.launch
-```
-
-### 1.2 重定位
-
-```text
-public_map.pcd → map_loader → /map_cloud ┐
-                                         ├→ fast_lio_localization → map -> odom
-/cloud_registered_base ------------------┤
-/fastlio_odom ---------------------------┘
-
-odom -> camera_init -> body -> base_link
-```
-
-推荐入口：
-
-```bash
-roslaunch scout_system_bringup scout_localization.launch map_name:=scout_map_01
-```
-
-### 1.3 导航
-
-先启动重定位，再启动 TEB：
-
-```bash
-roslaunch scout_navigation navigation_teb.launch map_name:=scout_map_01
-```
-
-导航位姿主要依赖 TF：
-
-```text
-map -> odom -> camera_init -> body -> base_link
-```
-
-速度反馈使用：
-
-```text
-/scout/odom
-```
-
-控制输出使用：
-
-```text
-/cmd_vel
-```
-
----
-
-
-### 1.4 D435i 视觉/深度链
-
-D435i 通过独立 `realsense_ws` 提供 ROS 驱动，统一入口位于：
-
-```bash
-roslaunch scout_system_bringup d435i.launch
-```
-
-当前链路：
-
-```text
-D435i USB3
-    ↓ librealsense 2.50.0 / RSUSB
-realsense2_camera
-    ├─ /camera/color/image_raw
-    ├─ /camera/depth/image_rect_raw
-    ├─ /camera/aligned_depth_to_color/image_raw
-    ├─ /camera/gyro/sample
-    ├─ /camera/accel/sample
-    └─ /camera/imu
-
-base_link
-    ↓ static TF
-camera_link
-    ↓ RealSense internal TF
-camera_color/depth/imu frames
-```
-
-当前固定安装外参：
-
-```text
-base_link -> camera_link
-x=0.27 m, y=0.00 m, z=0.10 m
-yaw=0, pitch=0, roll=π
-```
-
-当前用途为目标识别、视觉检测、深度测距和深度避障；默认不启用 D435i PointCloud2。
-
-
-# 2. 话题信息详细表
-
-## 2.1 核心传感器、FAST-LIO、重定位话题
-
-| 话题 | 消息类型 | 主要发布者 | 主要订阅者 | frame / child_frame | 使用阶段 | 说明 |
-|---|---|---|---|---|---|---|
-| `/livox/lidar` | `livox_ros_driver2/CustomMsg` | `livox_lidar_publisher2` | `laserMapping` | `livox_frame` | 建图、重定位 | Mid-360 原始点云。FAST-LIO `mid360.yaml` 中 `common/lid_topic` 指向该话题。 |
-| `/livox/imu` | `sensor_msgs/Imu` | `livox_lidar_publisher2` | `laserMapping` | 通常为 `livox_frame` | 建图、重定位 | Mid-360 IMU 数据。 |
-| `/cloud_registered` | `sensor_msgs/PointCloud2` | `laserMapping` | RViz/调试 | `camera_init` | 建图、重定位 | FAST-LIO 输出的世界坐标点云。当前运行链不依赖它做重定位。 |
-| `/cloud_registered_body` | `sensor_msgs/PointCloud2` | `laserMapping` | `scout_cloud_adapter`；导航 local costmap | `body` | 重定位、导航 | 当前实时障碍点云默认也从这里进入 local costmap。 |
-| `/Odometry` | `nav_msgs/Odometry` | `laserMapping` | 当前主链路无直接订阅 | header=`camera_init`；child=`body` | 建图、重定位 | FAST-LIO 原生里程计。它描述的是 `body`，不是车辆 `base_link`，因此当前系统不直接拿它给重定位/导航使用。 |
-| `/fastlio_odom` | `nav_msgs/Odometry` | `scout_pose_adapter` | `fast_lio_localization` | header=`odom`；child=`base_link` | 建图、重定位 | 由 TF `odom -> base_link` 转成标准车体 Odometry。**当前代码 twist 全部置 0，仅用于位姿/重定位，不适合给 TEB 做速度反馈。** |
-| `/cloud_registered_base` | `sensor_msgs/PointCloud2` | `scout_cloud_adapter` | `fast_lio_localization` | `base_link` | 重定位 | `/cloud_registered_body` 经 `body -> base_link` TF 转换后的车体点云，是当前 NDT 重定位输入。 |
-| `/map_cloud` | `sensor_msgs/PointCloud2` | `scout_map_loader` | `scout_global_localizer` | `map` | 重定位 | `public_map.pcd` 加载后的全局 PCD。发布器为 latch，一次发布后后启动的 localizer 仍可收到。 |
-| `/initialpose` | `geometry_msgs/PoseWithCovarianceStamped` | RViz / 用户程序 | `scout_global_localizer` | 应使用 `map` | 重定位 | RViz “2D Pose Estimate” 输入。localizer 会以该初值执行 NDT。 |
-| `/map_2d` | `nav_msgs/OccupancyGrid` | `scout_map_server` | RViz/其他可视化节点 | `map` | 重定位 | `scout_localization.launch` 加载 `map.yaml` 后将默认 `/map` 重映射为 `/map_2d`。它不是 NDT 使用的 PCD。 |
-| `/map_metadata` | `nav_msgs/MapMetaData` | `scout_map_server` | 可视化/工具 | - | 重定位 | 当前 localization launch 只重映射了 `map`，没有重映射 `map_metadata`，因此 metadata 仍是 `/map_metadata`。 |
-| `/tf` | `tf2_msgs/TFMessage` | FAST-LIO、NDT localizer 等 | 全系统 | 多 frame | 全阶段 | 动态 TF：主要是 `camera_init -> body`，重定位时另有 `map -> odom`。 |
-| `/tf_static` | `tf2_msgs/TFMessage` | `scout_tf_manager`、`scout_geometry_tf_publisher` | 全系统 | 多 frame | 全阶段 | 静态 TF：`odom -> camera_init`、`body -> base_link`。 |
-
-## 2.2 导航与底盘核心话题
-
-| 话题 | 消息类型 | 主要发布者 | 主要订阅者 | 使用阶段 | 说明 |
-|---|---|---|---|---|---|
-| `/nav_static_map` | `nav_msgs/OccupancyGrid` | `scout_navigation_map_server` | move_base global costmap | 导航 | `navigation_teb.launch` 默认加载 `map_raw.yaml`，避免在静态图中提前做导航膨胀。 |
-| `/nav_static_map_metadata` | `nav_msgs/MapMetaData` | `scout_navigation_map_server` | 导航工具 | 导航 | `/nav_static_map` 的地图元信息。 |
-| `/move_base_simple/goal` | `geometry_msgs/PoseStamped` | RViz | `move_base` | 导航 | RViz “2D Nav Goal” 的标准入口。目标通常应在 `map` 坐标系。 |
-| `/move_base/goal` | `move_base_msgs/MoveBaseActionGoal` | action client | `move_base` | 导航 | move_base action goal。 |
-| `/move_base/status` | `actionlib_msgs/GoalStatusArray` | `move_base` | RViz/日志分析 | 导航 | 判断 goal 是否 ACTIVE/SUCCEEDED/ABORTED。 |
-| `/move_base/GlobalPlanner/plan` | `nav_msgs/Path` | `GlobalPlanner` | RViz/日志 | 导航 | 全局规划路径。 |
-| `/move_base/TebLocalPlannerROS/global_plan` | `nav_msgs/Path` | TEB | RViz/日志 | 导航 | 送入 TEB 的局部截取/转换后的全局路径，用于诊断。 |
-| `/move_base/TebLocalPlannerROS/local_plan` | `nav_msgs/Path` | TEB | RViz/日志 | 导航 | TEB 当前局部轨迹。 |
-| `/move_base/TebLocalPlannerROS/teb_feedback` | `teb_local_planner/FeedbackMsg` | TEB | 日志/调试 | 导航 | 当前配置 `publish_feedback: true`，用于分析 TEB 优化结果。 |
-| `/move_base/global_costmap/costmap` | `nav_msgs/OccupancyGrid` | global costmap | RViz/日志 | 导航 | 全局代价地图。 |
-| `/move_base/local_costmap/costmap` | `nav_msgs/OccupancyGrid` | local costmap | RViz/日志 | 导航 | 6 m × 6 m rolling local costmap。 |
-| `/cmd_vel` | `geometry_msgs/Twist` | `move_base` / TEB | `scout_base_node` | 导航 | 最终底盘速度命令。当前主链路没有额外速度仲裁器，调试时必须确认没有其他节点同时发布。 |
-| `/scout/odom` | `nav_msgs/Odometry` | `scout_base_node` | move_base / TEB / 日志 | 导航 | Scout 轮速积分里程计。header=`odom`，child=`base_link`。**当前 `pub_tf=false`，因此它不发布 `odom -> base_link` TF。** |
-| `/scout_status` | `scout_msgs/ScoutStatus` | `scout_base_node` | 监控程序 | 底盘 | 线速度、角速度、电压、故障码、电机状态等。 |
-| `/BMS_status` | `scout_msgs/ScoutBmsStatus` | `scout_base_node` | 监控程序 | 底盘 | 当前源码中 BMS 详细字段多数未实际填充，不能把字段存在等同于数据有效。 |
-| `/rs_status` | `scout_msgs/ScoutRsStatus` | `scout_base_node` | 监控程序 | 底盘 | 遥控器/RC 状态。 |
-| `/scout_light_control` | `scout_msgs/ScoutLightCmd` | 用户程序 | `scout_base_node` | 底盘 | 灯光控制。 |
-
-
-## 2.3 D435i RGB、Depth 与 IMU 话题
-
-| 话题 | 消息类型 | 主要发布者 | 主要订阅者/用途 | frame | 说明 |
-|---|---|---|---|---|---|
-| `/camera/color/image_raw` | `sensor_msgs/Image` | `realsense2_camera` | 目标识别、视觉检测、RViz/rqt | `camera_color_optical_frame` | D435i RGB 原始图像。 |
-| `/camera/color/camera_info` | `sensor_msgs/CameraInfo` | `realsense2_camera` | 相机模型、投影/反投影 | `camera_color_optical_frame` | RGB 内参。 |
-| `/camera/depth/image_rect_raw` | `sensor_msgs/Image` | `realsense2_camera` | 原始深度处理 | `camera_depth_optical_frame` | Depth rectified 原始深度图。 |
-| `/camera/depth/camera_info` | `sensor_msgs/CameraInfo` | `realsense2_camera` | 深度相机模型 | `camera_depth_optical_frame` | Depth 内参。 |
-| `/camera/aligned_depth_to_color/image_raw` | `sensor_msgs/Image` | `realsense2_camera` | **目标检测后查询对应深度的推荐输入** | `camera_color_optical_frame`/对齐输出 frame 以实际消息为准 | 当前 `align_depth=true`。 |
-| `/camera/aligned_depth_to_color/camera_info` | `sensor_msgs/CameraInfo` | `realsense2_camera` | 对齐深度图相机模型 | 以实际消息为准 | 与 aligned depth 配套。 |
-| `/camera/gyro/sample` | `sensor_msgs/Imu` | `realsense2_camera` | IMU调试/算法 | gyro frame | D435i 陀螺仪原始流。 |
-| `/camera/accel/sample` | `sensor_msgs/Imu` | `realsense2_camera` | IMU调试/算法 | accel frame | D435i 加速度计原始流。 |
-| `/camera/imu` | `sensor_msgs/Imu` | `realsense2_camera` | 需要统一 IMU 流的算法 | 以实际消息为准 | `unite_imu_method=linear_interpolation` 生成。 |
-| `/tf_static` | `tf2_msgs/TFMessage` | `base_to_d435i` + RealSense | 全系统 | 多 frame | `base_link -> camera_link` 以及 D435i 内部静态 TF。 |
-
-### 2.3.1 D435i 常用检查命令
-
-```bash
-lsusb -t
-```
-
-```bash
-rostopic hz /camera/color/image_raw
-```
-
-```bash
-rostopic hz /camera/depth/image_rect_raw
-```
-
-```bash
-rostopic hz /camera/aligned_depth_to_color/image_raw
-```
-
-```bash
-rostopic hz /camera/gyro/sample
-```
-
-```bash
-rostopic hz /camera/accel/sample
-```
-
-```bash
-rostopic hz /camera/imu
-```
-
-```bash
-rosrun tf tf_echo base_link camera_link
-```
-
-```bash
-rosrun tf tf_echo base_link camera_color_optical_frame
-```
-
-
-## 2.4 当前存在但不是主链路有效数据的话题
-
-| 话题 | 当前状态 | 原因 |
-|---|---|---|
-| `/path` | Advertise 存在，但当前默认不发布 | `mid360.yaml` 中 `publish/path_en: false`。 |
-| `/cloud_effected` | Advertise 存在，但实际发布代码被注释 | `publish_effect_world()` 调用被注释。 |
-| `/Laser_map` | Advertise 存在，但实际发布代码被注释 | `publish_map()` 调用被注释。 |
-| `/Odometry` | 有效发布，但当前主链路不直接使用 | 其 frame 是 `camera_init -> body`，当前系统统一通过 TF + `scout_pose_adapter` 得到 `odom -> base_link`。 |
-
-### 2.5 常用话题检查命令
-
-以下命令均为单行，可直接复制：
-
-```bash
-rostopic hz /livox/lidar
-```
-
-```bash
-rostopic hz /livox/imu
-```
-
-```bash
-rostopic hz /cloud_registered_body
-```
-
-```bash
-rostopic hz /cloud_registered_base
-```
-
-```bash
-rostopic echo -n 1 /fastlio_odom
-```
-
-```bash
-rostopic echo -n 1 /scout/odom
-```
-
-```bash
-rostopic info /cmd_vel
-```
-
-```bash
-rostopic list | sort
-```
-
----
-
-# 3. Launch 信息表
-
-## 3.1 当前正式使用的 Launch
-
-| Launch 文件 | 级别 | 作用 | 主要启动/包含内容 | 建议 |
-|---|---|---|---|---|
-| `scout_system_bringup/launch/scout_mapping.launch` | **主入口** | 一键建图 | Mid-360、FAST-LIO、静态点云过滤/累积、地图完成服务、TF Manager、Pose Adapter、Scout Base | 启动时必须传 `map_name`；结束前调用 `/finish_mapping`。 |
-| `scout_system_bringup/launch/scout_localization.launch` | **主入口** | 重定位 | Mid-360、FAST-LIO local odom、TF Manager、Pose Adapter、Cloud Adapter、NDT localizer、2D map_server、Scout Base | 当前定位推荐入口。 |
-| `scout_system_bringup/launch/d435i.launch` | **D435i入口** | RGB/Depth/IMU + 相机安装 TF | include `realsense2_camera/rs_camera.launch`；发布 `base_link -> camera_link` | 可单独启动，也可由整车主 launch include；若已 include，不要再重复手工启动。 |
-| `scout_navigation/launch/navigation_teb.launch` | **主入口** | 导航 | navigation map_server、move_base、GlobalPlanner、TEB、local/global costmap | 当前导航推荐入口；应在 localization 正常后启动。 |
-| `scout_system_bringup/launch/fastlio_mapping_scout.launch` | 被包含 | FAST-LIO 建图包装 | 载入 `mid360.yaml`，保持 `pcd_save_en=false`，发布注册点云和 body 点云 | 不建议单独作为整车入口。 |
-| `scout_pointcloud_mapper/launch/pointcloud_mapper.launch` | 被包含 | 过滤地图构建 | 订阅注册点云和 FAST-LIO odom，过滤、累积并提供底层保存服务 | 不回灌 FAST-LIO，不发布 TF。 |
-| `scout_mapping_finisher` | 被启动 | 完成地图 | `/finish_mapping` 先保存过滤 PCD，再运行地图归档和栅格生成 | 成功后才能停止建图 launch。 |
-| `scout_system_bringup/launch/fastlio_local_odom.launch` | 被包含 | FAST-LIO 定位模式本地里程计 | `pcd_save_en=false`，保留 body 点云 | localization 内部使用。 |
-| `scout_system_bringup/launch/scout_relocalization.launch` | 被包含 | PCD/NDT 全局重定位 | `map_loader` + `fast_lio_localization`；输入重映射为 `/cloud_registered_base`、`/fastlio_odom` | localization 内部使用。 |
-| `scout_tf_manager/launch/tf_manager.launch` | 被包含 | 静态几何 TF | `body -> base_link`；`odom -> camera_init` | 必须保持唯一 TF 发布者。 |
-| `scout_pose_adapter/launch/pose_adapter.launch` | 被包含 | TF 转 Odometry | `odom -> base_link` TF → `/fastlio_odom` | 给重定位提供车体位姿。 |
-| `scout_cloud_adapter/launch/cloud_adapter.launch` | 被包含 | 点云坐标转换 | `/cloud_registered_body` → `/cloud_registered_base` | 给 NDT 使用 base_link 点云。 |
-| `livox_ros_driver2/launch_ROS1/msg_MID360.launch` | 被包含 | Mid-360 驱动 | `/livox/lidar`、`/livox/imu` | 当前硬件驱动。 |
-| `scout_bringup/launch/scout_mini_robot_base.launch` | 被包含 | Scout Mini 底盘入口 | 进一步包含 `scout_base.launch`，设置 mini 模式 | 当前整车启动链使用。 |
-| `scout_base/launch/scout_base.launch` | 被包含 | 底盘 ROS 驱动 | CAN `can0`、`/cmd_vel`、`/scout/odom`、状态话题 | 当前通过上层 bringup 调用。 |
-
-## 3.2 调试/回退 Launch
-
-| Launch 文件 | 当前定位 | 是否纳入正式操作流程 | 说明 |
+| 模式 | 必需启动 | 主要输出 | 禁止同时启动 |
 |---|---|---|---|
-| `scout_navigation/launch/nav_logging.launch` | 导航诊断 | 可选 | 启动 rosbag 记录和自动分析。不是车辆运行必要组件。 |
-| `scout_navigation/launch/global_planning_test.launch` | 全局规划专项测试 | 否 | 禁止实际输出到底盘，`cmd_vel` 被重映射到 blocked 话题。 |
-| `scout_navigation/launch/navigation.launch` | DWA 回退方案 | 默认否 | 当前主方案已经使用 `navigation_teb.launch`；可保留作为对照/回滚。 |
+| 底盘/雷达基础检查 | `scout_livox_base.launch` | Livox数据、Scout状态和轮速里程计 | 其他会重复启动雷达或底盘的总launch |
+| 建图 | `scout_mapping.launch` | FAST-LIO位姿、贝叶斯静态点云、过滤PCD | `scout_localization.launch`、旧`scout_system.launch` |
+| 重定位 | `scout_localization.launch` | `map → odom`、地图点云、`/map_2d` | 建图总launch、其他`map → odom`发布者 |
+| 导航 | 先定位，再`navigation_teb.launch` | costmap、路径、`/cmd_vel` | 第二个move_base、第二个底盘驱动 |
+| 全局规划安全测试 | 定位后`global_planning_test.launch` | make_plan结果，不向底盘发速度 | 正式navigation launch |
+| 相机 | `D435I.launch` | RGB、对齐深度、camera_info、TF | 第二个RealSense驱动实例 |
 
-## 3.3 建议忽略的历史、示例或已废弃 Launch
+## 2. Launch文件完整清单
 
-以下文件不应再写入当前正式操作步骤；可以保留源码，但不要与主链路混用：
+### 2.1 系统级Launch
 
-| 文件/目录 | 判断 | 原因 |
+| 文件 | 参数 | 实际启动内容 | 使用状态 |
+|---|---|---|---|
+| `scout_system_bringup/launch/scout_mapping.launch` | `map_name`，默认`current_mapping` | Mid-360、FAST-LIO、mapper、TF manager、pose adapter、Scout底盘 | 正式建图唯一入口 |
+| `scout_system_bringup/launch/scout_localization.launch` | `map_name`、`map_dir`、`map_pcd`、`map_yaml` | Mid-360、FAST-LIO local odom、TF、pose/cloud adapter、map loader、NDT、map_server、底盘 | 正式重定位入口 |
+| `scout_system_bringup/launch/scout_relocalization.launch` | `map_pcd` | `map_loader`和NDT localizer | 被localization包含，不单独启动整机 |
+| `scout_system_bringup/launch/fastlio_mapping_scout.launch` | `rviz=false` | 参数加载、`laserMapping`，FAST-LIO PCD保存关闭 | 被mapping包含 |
+| `scout_system_bringup/launch/fastlio_local_odom.launch` | `rviz=false` | 与建图相同的FAST-LIO里程计输出，PCD保存关闭 | 被localization包含 |
+| `scout_system_bringup/launch/scout_livox_base.launch` | 无 | Mid-360和底盘，不启动FAST-LIO | 硬件基础检查 |
+| `scout_system_bringup/launch/D435I.launch` | 由rs_camera提供 | D435i彩色、深度、对齐、内部TF及安装TF | 相机独立启动 |
+| `scout_system_bringup/launch/scout_system.launch` | 无 | 上游`mapping_mid360.launch`、TF、底盘 | 旧入口；没有新mapper，正式建图禁用 |
+
+### 2.2 功能包Launch
+
+| 文件 | 参数/默认值 | 节点或行为 |
 |---|---|---|
-| `scout_system_bringup/launch/scout_system.launch` | **早期整机入口，建议不再作为正式入口** | 直接调用上游 `mapping_mid360.launch`，缺少当前已加入的 Pose Adapter、Cloud Adapter、重定位和导航组织方式。 |
-| `fast_lio_localization/launch/fast_lio_localization.launch` | **上游示例** | 使用示例 PCD `IB-4L.pcd`，还带 `body -> velodyne` 静态 TF，不符合当前 Scout TF 设计。 |
-| `fast_lio_localization/launch/map_loader.launch` | 上游示例 | 默认地图同样指向示例 `IB-4L.pcd`；当前由 `scout_relocalization.launch` 管理。 |
-| `FAST_LIO/launch/mapping_avia.launch` 等非 Mid-360 launch | 上游示例 | 当前硬件是 Mid-360。 |
-| `FAST_LIO/launch/mapping_mid360.launch` | 上游原始入口 | 当前正式建图/定位已分别由 `fastlio_mapping_scout.launch` 和 `fastlio_local_odom.launch` 包装，避免参数混淆。 |
-| `livox_ros_driver2/launch_ROS1/msg_AVIA2.launch`、`msg_HAP.launch`、`msg_mixed.launch` 等 | 上游示例 | 当前只使用 Mid-360。 |
-| `livox_ros_driver2/launch_ROS1/rviz_*.launch` | 上游可视化示例 | 非整车主链路。 |
-| `scout_description/launch/*`、Gazebo/display launch | 模型/仿真 | 当前实车 `scout_mini_robot_base.launch` 中 description include 已被注释。 |
-| `scout_base/launch/scout_mini_base.launch`、`scout_mini_omni.launch` | 直接底盘示例/旧入口 | 当前通过 `scout_bringup/scout_mini_robot_base.launch -> scout_base.launch` 启动。 |
-| `teb_migration_patch_V4.0/` | **迁移补丁/备份目录** | 无 `package.xml`，不是当前 catkin 包；正式配置已经进入 `scout_navigation`。 |
+| `scout_pointcloud_mapper/launch/pointcloud_mapper.launch` | `map_name=current_mapping`、`input_cloud=/cloud_registered`、`input_odom=/Odometry`、`output_path=~/livox_fastlio/maps/<name>/filtered_camera_init.pcd` | `scout_pointcloud_mapper`，required=true |
+| `scout_tf_manager/launch/tf_manager.launch` | 从两个YAML加载 | `scout_tf_manager`发布`body → base_link`；`scout_geometry_tf_publisher`发布`odom → camera_init` |
+| `scout_pose_adapter/launch/pose_adapter.launch` | parent=`odom`、child=`base_link`、topic=`/fastlio_odom`、20 Hz | TF转Odometry |
+| `scout_cloud_adapter/launch/cloud_adapter.launch` | input=`/cloud_registered_body`、output=`/cloud_registered_base`、target=`base_link` | 点云frame转换 |
+| `scout_navigation/launch/navigation.launch` | `map_name`、`odom_topic=/scout/odom`、`cmd_vel_topic=/cmd_vel`、`obstacle_cloud_topic=/cloud_registered_body` | `map_raw.yaml` + move_base + GlobalPlanner + DWA |
+| `scout_navigation/launch/navigation_teb.launch` | 同上 | `map_raw.yaml` + move_base + GlobalPlanner + TEB；当前正式导航入口 |
+| `scout_navigation/launch/global_planning_test.launch` | `map_name` | 关闭local obstacle layer，cmd_vel重映射到blocked话题，RViz clicked point请求make_plan |
+| `scout_navigation/launch/nav_logging.launch` | `tag=nav_test` | 启动导航rosbag记录脚本 |
+| `scout_bringup/launch/scout_mini_robot_base.launch` | `port_name=can0`、`simulated_robot=false`、`odom_topic_name`、`pub_tf=false` | `scout_base_node`；正式系统始终覆盖odom话题为`/scout/odom` |
 
-> 注意：`ugv_sdk`、`scout_msgs` 等虽然不在“主入口 launch 表”中，但它们仍是底盘驱动的编译/运行依赖，**不能因为未直接 launch 就删除**。
+### 2.3 正式Launch的节点展开
 
----
+#### 建图
 
-# 4. TF Tree 信息表
+```text
+/livox_lidar_publisher2
+/laserMapping
+/scout_pointcloud_mapper
+/scout_tf_manager
+/scout_geometry_tf_publisher
+/scout_pose_adapter
+/scout_base_node
+```
 
-## 4.1 当前 TF 主树
+检查：
 
-### 建图模式
+```bash
+roslaunch --nodes scout_system_bringup scout_mapping.launch map_name:=check_map
+```
+
+#### 重定位
+
+```text
+/livox_lidar_publisher2
+/laserMapping
+/scout_tf_manager
+/scout_geometry_tf_publisher
+/scout_pose_adapter
+/scout_cloud_adapter
+/scout_map_loader
+/scout_global_localizer
+/scout_map_server
+/scout_base_node
+```
+
+#### 导航TEB
+
+```text
+/scout_navigation_map_server
+/move_base
+```
+
+定位launch必须继续运行，导航launch不重复启动雷达、FAST-LIO、TF、NDT或底盘。
+
+## 3. 节点职责与输入输出
+
+| 节点 | 包 | 订阅/输入 | 发布/输出 | 是否发TF |
+|---|---|---|---|---|
+| `livox_lidar_publisher2` | `livox_ros_driver2` | Mid-360 UDP | `/livox/lidar`、`/livox/imu` | 否 |
+| `laserMapping` | `fast_lio` | Livox点云、IMU | 注册点云、`/Odometry`、FAST-LIO TF | `camera_init → body` |
+| `scout_pointcloud_mapper` | `scout_pointcloud_mapper` | `/cloud_registered`、`/Odometry` | 静态扫描、静态地图云、PCD | 否 |
+| `scout_tf_manager` | `scout_tf_manager` | `extrinsics.yaml` | `/tf_static` | `body → base_link` |
+| `scout_geometry_tf_publisher` | `scout_tf_manager` | `scout_geometry.yaml` | `/tf_static` | `odom → camera_init` |
+| `scout_pose_adapter` | `scout_pose_adapter` | TF `odom → base_link` | `/fastlio_odom` | 否 |
+| `scout_cloud_adapter` | `scout_cloud_adapter` | body点云和TF | `/cloud_registered_base` | 否 |
+| `scout_map_loader` | `fast_lio_localization` | `public_map.pcd` | `/map_cloud` | 否 |
+| `scout_global_localizer` | `fast_lio_localization` | 地图、实时base点云、FAST-LIO位姿、初始位姿 | NDT结果 | `map → odom` |
+| `scout_map_server` | `map_server` | `map.yaml` | `/map_2d`、地图元数据 | 否 |
+| `scout_navigation_map_server` | `map_server` | `map_raw.yaml` | `/nav_static_map`、元数据 | 否 |
+| `move_base` | `move_base` | 地图、TF、轮速里程计、实时障碍、目标 | 全局/局部路径、速度 | 否 |
+| `scout_base_node` | `scout_base` | CAN、`/cmd_vel`、灯光命令 | `/scout/odom`和状态 | 正式配置为否 |
+| `scout_global_plan_tester` | `scout_navigation` | `/clicked_point`、TF、make_plan服务 | `/scout_global_plan_test` | 否 |
+| `realsense2_camera` | `realsense2_camera` | D435i USB | RGB、深度、camera_info、相机TF | 相机内部TF |
+| `base_to_d435i` | `tf2_ros` | launch参数 | `/tf_static` | `base_link → camera_link` |
+
+## 4. 话题完整表
+
+### 4.1 Livox与FAST-LIO
+
+| 话题 | 类型 | 发布者 | 主要订阅者 | header frame | 阶段/说明 |
+|---|---|---|---|---|---|
+| `/livox/lidar` | `livox_ros_driver2/CustomMsg` | Livox驱动 | FAST-LIO | `livox_frame`或驱动配置值 | 原始雷达数据 |
+| `/livox/imu` | `sensor_msgs/Imu` | Livox驱动 | FAST-LIO | Livox IMU frame | IMU初始化必需 |
+| `/cloud_registered` | `sensor_msgs/PointCloud2` | FAST-LIO | mapper、RViz | `camera_init` | 世界系当前注册扫描，不是完整累计图 |
+| `/cloud_registered_body` | `sensor_msgs/PointCloud2` | FAST-LIO | cloud adapter、local costmap | `body` | 车体系当前扫描 |
+| `/cloud_registered_base` | `sensor_msgs/PointCloud2` | cloud adapter | NDT localizer | `base_link` | 重定位匹配输入 |
+| `/cloud_effected` | `sensor_msgs/PointCloud2` | FAST-LIO | 调试 | `camera_init` | 有效匹配特征 |
+| `/Laser_map` | `sensor_msgs/PointCloud2` | FAST-LIO | 调试/RViz | `camera_init` | FAST-LIO内部局部地图输出 |
+| `/Odometry` | `nav_msgs/Odometry` | FAST-LIO | mapper | frame=`camera_init`，child=`body` | mapper时间同步和传感器位置 |
+| `/path` | `nav_msgs/Path` | FAST-LIO | RViz | `camera_init` | 当前`path_en=false`，通常无数据 |
+
+### 4.2 点云预处理与地图累积
+
+| 话题/服务 | 类型 | 发布/服务节点 | 消费者 | frame/行为 |
+|---|---|---|---|---|
+| `/scout/static_scan` | `sensor_msgs/PointCloud2` | mapper | RViz/诊断 | 与`/cloud_registered`相同，通常`camera_init`；仅当前满足静态条件的点 |
+| `/scout/static_map_cloud` | `sensor_msgs/PointCloud2` | mapper | RViz/诊断 | `camera_init`；latched累计有效细地图 |
+| `/scout/dynamic_points` | `sensor_msgs/PointCloud2` | mapper | 调试 | 默认不发布，`publish_dynamic_points=false` |
+| `/scout_pointcloud_mapper/save_map` | `std_srvs/Trigger` | mapper | 人工诊断 | 立即保存当前有效PCD；正常流程不用 |
+| `/scout_pointcloud_mapper/reset_map` | `std_srvs/Empty` | mapper | 人工诊断 | 清空占据与细地图，谨慎调用 |
+
+mapper日志字段：
+
+| 字段 | 含义 |
+|---|---|
+| `input` | FAST-LIO输入点数 |
+| `filtered` | 距离、体素和离群处理后点数 |
+| `static_scan` | 当前扫描中已满足静态条件的点数 |
+| `map` | 内存中的0.05 m细体素数，包含尚未输出的当前generation候选 |
+| `occupancy` | 0.20 m贝叶斯占据状态数量 |
+| `bayes_cleared` | 因空闲概率达到阈值而清除的粗体素累计数 |
+
+### 4.3 地图和重定位
+
+| 话题 | 类型 | 发布者 | 订阅者 | frame/说明 |
+|---|---|---|---|---|
+| `/map_cloud` | `sensor_msgs/PointCloud2` | `scout_map_loader` | NDT、RViz | `map`，latched；来自`public_map.pcd` |
+| `/initialpose` | `geometry_msgs/PoseWithCovarianceStamped` | RViz 2D Pose Estimate | NDT | 应为`map` frame |
+| `/fastlio_odom` | `nav_msgs/Odometry` | pose adapter | NDT | frame=`odom`，child=`base_link`；twist全0 |
+| `/map_2d` | `nav_msgs/OccupancyGrid` | localization map_server | RViz/其他参考消费者 | `map`；来自`map.yaml` |
+| `/map_metadata` | `nav_msgs/MapMetaData` | localization map_server | 地图消费者 | 只remap了`map`时，元数据通常仍为此名；以`rostopic list`实机确认 |
+| `/tf` | `tf2_msgs/TFMessage` | FAST-LIO、NDT | 全系统 | 动态TF |
+| `/tf_static` | `tf2_msgs/TFMessage` | TF manager、D435i等 | 全系统 | 静态TF |
+
+NDT节点当前没有单独的“定位结果Pose”话题，最终结果通过TF `map → odom`生效。
+
+### 4.4 Scout底盘
+
+| 话题 | 类型 | 发布/订阅 | 说明 |
+|---|---|---|---|
+| `/cmd_vel` | `geometry_msgs/Twist` | move_base发布，`scout_base_node`订阅 | `linear.x`和`angular.z`控制底盘 |
+| `/scout/odom` | `nav_msgs/Odometry` | `scout_base_node`发布 | frame=`odom`，child=`base_link`；正式系统速度反馈源 |
+| `/scout_status` | `scout_msgs/ScoutStatus` | 底盘发布 | 车辆状态、电压等协议字段 |
+| `/BMS_status` | `scout_msgs/ScoutBmsStatus` | 底盘发布 | BMS消息；不代表当前CAN一定有可靠SOC |
+| `/rs_status` | `scout_msgs/ScoutRsStatus` | 底盘发布 | 遥控/状态相关消息 |
+| `/scout_light_control` | `scout_msgs/ScoutLightCmd` | 用户发布，底盘订阅 | 灯光控制 |
+
+正式launch中`pub_tf=false`，所以`/scout/odom`有消息但底盘不广播`odom → base_link`。
+
+### 4.5 Navigation与move_base
+
+| 话题 | 类型 | 发布者/订阅者 | 说明 |
+|---|---|---|---|
+| `/nav_static_map` | `nav_msgs/OccupancyGrid` | navigation map_server发布，global static layer订阅 | 来自`map_raw.yaml`，固化膨胀为0 |
+| `/nav_static_map_metadata` | `nav_msgs/MapMetaData` | navigation map_server发布 | navigation地图元数据 |
+| `/move_base_simple/goal` | `geometry_msgs/PoseStamped` | RViz发布，move_base订阅 | 2D Nav Goal入口 |
+| `/move_base/goal` | `move_base_msgs/MoveBaseActionGoal` | action客户端→move_base | action目标 |
+| `/move_base/status` | `actionlib_msgs/GoalStatusArray` | move_base | action状态 |
+| `/move_base/result` | `move_base_msgs/MoveBaseActionResult` | move_base | action结果 |
+| `/move_base/feedback` | `move_base_msgs/MoveBaseActionFeedback` | move_base | action反馈 |
+| `/move_base/GlobalPlanner/plan` | `nav_msgs/Path` | GlobalPlanner | 全局路径 |
+| `/move_base/TebLocalPlannerROS/local_plan` | `nav_msgs/Path` | TEB | 局部轨迹 |
+| `/move_base/global_costmap/costmap` | `nav_msgs/OccupancyGrid` | global costmap | 全局代价地图 |
+| `/move_base/local_costmap/costmap` | `nav_msgs/OccupancyGrid` | local costmap | 局部滚动代价地图 |
+| `/clicked_point` | `geometry_msgs/PointStamped` | RViz Publish Point | global plan tester输入 |
+| `/scout_global_plan_test` | `nav_msgs/Path` | global plan tester | 安全全局规划测试结果 |
+| `/scout_navigation/cmd_vel_blocked` | `geometry_msgs/Twist` | global planning test中的move_base | 安全锁话题，不接底盘 |
+
+move_base常用服务：
+
+| 服务 | 类型 | 用途 |
+|---|---|---|
+| `/move_base/make_plan` | `nav_msgs/GetPlan` | 给定起终点请求全局路径 |
+| `/move_base/clear_costmaps` | `std_srvs/Empty` | 清理可清除costmap层；车辆安全确认后使用 |
+
+### 4.6 D435i
+
+当前launch参数：color=true、depth=true、align_depth=true、accel/gyro=false、pointcloud=false、publish_tf=true。
+
+典型RealSense ROS1话题如下；具体命名受驱动版本影响，最终以`rostopic list | sort`为准。
+
+| 话题 | 类型 | frame/用途 |
+|---|---|---|
+| `/camera/color/image_raw` | `sensor_msgs/Image` | 彩色原图，通常`camera_color_optical_frame` |
+| `/camera/color/camera_info` | `sensor_msgs/CameraInfo` | 彩色内参 |
+| `/camera/depth/image_rect_raw` | `sensor_msgs/Image` | 原深度图 |
+| `/camera/depth/camera_info` | `sensor_msgs/CameraInfo` | 深度内参 |
+| `/camera/aligned_depth_to_color/image_raw` | `sensor_msgs/Image` | 对齐到彩色的深度 |
+| `/camera/aligned_depth_to_color/camera_info` | `sensor_msgs/CameraInfo` | 对齐深度内参，驱动版本可能复用color info |
+| `/camera/color/image_raw/compressed` | `sensor_msgs/CompressedImage` | 仅在image_transport插件启用时存在 |
+
+当前不应出现D435i IMU和PointCloud2流；若出现，检查launch参数是否被其他入口覆盖。
+
+## 5. TF树与唯一发布者
+
+### 5.1 建图TF树
 
 ```text
 odom
- └── camera_init
-      └── body
-           └── base_link
+└─ camera_init                     static
+   └─ body                         dynamic
+      └─ base_link                 static
+         └─ camera_link            static（仅D435I.launch启动时）
+            ├─ camera_color_frame  RealSense static
+            │  └─ camera_color_optical_frame
+            └─ camera_depth_frame  RealSense static
+               └─ camera_depth_optical_frame
 ```
 
-### 重定位 / 导航模式
+### 5.2 定位/导航TF树
 
 ```text
 map
- └── odom
-      └── camera_init
-           └── body
-                └── base_link
+└─ odom                            dynamic
+   └─ camera_init                  static
+      └─ body                      dynamic
+         └─ base_link              static
+            └─ camera_link ...
 ```
 
-## 4.2 TF 详细信息
+### 5.3 TF责任表
 
-| Parent | Child | 类型 | 发布者 | 参数来源 | 使用阶段 | 作用 |
-|---|---|---|---|---|---|---|
-| `map` | `odom` | 动态 TF | `scout_global_localizer` / `fast_lio_localization` | NDT 在线计算；`tf_postdate_sec` 默认 0.25 s | 重定位、导航 | 全局地图对 FAST-LIO 本地里程计的修正。 |
-| `odom` | `camera_init` | 静态 TF | `scout_geometry_tf_publisher` | `scout_system_bringup/config/scout_geometry.yaml` | 建图、重定位、导航 | 将 FAST-LIO 的 `camera_init` 世界系与车辆 `odom` 约定对齐。当前参数：x=0.25 m，y=0，z=0.20 m，pitch=45°。 |
-| `camera_init` | `body` | 动态 TF | FAST-LIO `laserMapping` | FAST-LIO 状态估计 | 建图、重定位、导航 | FAST-LIO 实时估计的 IMU/body 位姿。 |
-| `body` | `base_link` | 静态 TF | `scout_tf_manager` | `scout_tf_manager/config/extrinsics.yaml` | 建图、重定位、导航 | 把 FAST-LIO body 转换到车辆标准 `base_link`。配置文件记录的是 `base_link -> body` 测量值，程序设置 `publish_inverse=true` 后发布反变换。 |
-| `base_link` | `camera_link` | 静态 TF | `base_to_d435i` | `scout_system_bringup/launch/d435i.launch` | D435i运行时 | D435i 安装外参，当前写死 x=0.27、y=0、z=0.10、roll=π。 |
+| TF边 | 类型 | 唯一发布者 | 参数/源码 |
+|---|---|---|---|
+| `map → odom` | dynamic | `scout_global_localizer` | `fast_lio_localization.cpp`，`tf_postdate_sec=0.50` |
+| `odom → camera_init` | static | `scout_geometry_tf_publisher` | `scout_geometry.yaml` |
+| `camera_init → body` | dynamic | FAST-LIO `laserMapping` | FAST-LIO状态估计 |
+| `body → base_link` | static | `scout_tf_manager` | `extrinsics.yaml`，完整刚体逆变换 |
+| `base_link → camera_link` | static | `base_to_d435i` | `D435I.launch`实际参数`0.27 0 0.10 0 0 0` |
+| RealSense内部frame | static/dynamic | `realsense2_camera` | 驱动标定 |
 
-## 4.3 当前 body/base_link 外参说明
+禁止项：
 
-`extrinsics.yaml` 中写入的是便于测量的：
+- 底盘`pub_tf=true`；
+- 第二个NDT/AMCL发布`map → odom`；
+- static_transform_publisher重复`camera_init → body`；
+- 在多个launch中手写同一外参；
+- 同时启动两个RealSense实例。
 
-```text
-base_link -> body
-x = 0.25 m
-y = 0.00 m
-z = 0.20 m
-pitch = +45°
-```
-
-实际发布的是完整刚体反变换：
-
-```text
-body -> base_link
-```
-
-由于存在 45° 旋转，反变换的平移**不能简单写成** `(-0.25, 0, -0.20)`；程序使用 4×4 齐次变换矩阵求逆，这是正确做法。
-
-## 4.4 哪些节点绝对不能再发布同一条 TF
-
-| TF | 当前唯一发布者 | 禁止的重复发布来源 |
-|---|---|---|
-| `map -> odom` | `fast_lio_localization` | 其他 AMCL/SLAM/localization 节点同时发布同一边。 |
-| `odom -> camera_init` | `scout_geometry_tf_publisher` | 旧 static_transform_publisher、旧脚本、手工写死 launch。 |
-| `camera_init -> body` | FAST-LIO | 其他节点不能伪造同名动态 TF。 |
-| `body -> base_link` | `scout_tf_manager` | 旧 static_transform_publisher、URDF 中重复固定关节。 |
-| `odom -> base_link` | **不应有直接发布者** | Scout 底盘驱动必须保持 `pub_tf=false`；系统通过 `odom -> camera_init -> body -> base_link` 组合得到。 |
-
-## 4.5 `/scout/odom` 与 TF 的关系
-
-这是当前系统中最容易误解的一点：
-
-- `/scout/odom` 消息的 `header.frame_id = odom`、`child_frame_id = base_link`；
-- 但底盘 launch 明确设置 `pub_tf=false`；
-- 因此 `/scout/odom` **不会**产生 `odom -> base_link` TF；
-- 导航位姿应以 TF 主树为准；
-- `/scout/odom` 当前主要用于给 TEB 提供实际线速度和角速度反馈。
-
-如果把 `pub_tf` 改成 `true`，会和 FAST-LIO 组合出来的 `odom -> base_link` 形成两套不一致来源，出现 TF 抖动、跳变或导航异常。
-
-## 4.6 `livox_frame` 为什么不在 TF 主树里
-
-Livox 驱动消息头使用 `livox_frame`，但当前系统没有额外发布 `body <-> livox_frame` TF。FAST-LIO 对激光雷达到 IMU/body 的小外参使用 `FAST_LIO/config/mid360.yaml` 中：
-
-```yaml
-mapping:
-  extrinsic_T: [-0.011, -0.02329, 0.04412]
-  extrinsic_R: [1, 0, 0, 0, 1, 0, 0, 0, 1]
-```
-
-这组参数属于 **LiDAR ↔ IMU 内部外参**，与车辆安装关系 `base_link ↔ body` 不是同一组参数，不要混改。
-
-### TF 检查命令
+### 5.4 TF检查
 
 ```bash
+rosrun tf tf_echo map odom
+rosrun tf tf_echo odom camera_init
+rosrun tf tf_echo camera_init body
+rosrun tf tf_echo body base_link
 rosrun tf tf_echo map base_link
+rosrun tf tf_monitor
+rosrun rqt_tf_tree rqt_tf_tree
 ```
 
-建图模式没有 `map -> odom`，此时检查：
+FAST-LIO完成IMU初始化前，`camera_init → body`暂时不存在，启动早期一次“two or more unconnected trees”可以是正常等待；初始化后持续出现才是故障。
+
+## 6. 关键参数完整表
+
+### 6.1 mapper：`scout_pointcloud_mapper/config/mapper.yaml`
+
+| 参数 | 当前值 | 作用 | 调大影响 | 调小影响 |
+|---|---:|---|---|---|
+| `min_range` | 0.50 m | 删除近距离点 | 删除更多近点 | 保留更多车体/近噪声 |
+| `max_range` | 50 m | 最大建图距离 | 点数和噪声增加 | 远处结构缺失 |
+| `scan_voxel_size` | 0.05 m | 单帧降采样 | 更稀疏、更省CPU | 更密、更耗CPU |
+| `radius_filter/radius` | 0.15 m | 离群邻域半径 | 更易保留稀疏群 | 更易删除稀疏点 |
+| `radius_filter/min_neighbors` | 2 | 最少邻点 | 更严格 | 更宽松 |
+| `self_filter/enable` | false | 自车包围盒 | 开启前必须实测 | 关闭可能保留车体点 |
+| `dynamic_filter/voxel_size` | 0.20 m | 贝叶斯粗占据体素 | 动态判断更粗 | 状态数量/CPU增加 |
+| `hit_probability` | 0.70 | 命中log-odds | 更快确认，也更难清 | 更慢确认 |
+| `miss_probability` | 0.40 | 穿过射线的空闲证据 | 越接近0.5清除越慢 | 越小清除越快 |
+| `occupied_probability` | 0.72 | 输出占据阈值 | 更严格 | 更宽松 |
+| `clearing_probability` | 0.35 | 删除粗体素阈值 | 更早彻底失效 | 需要更多空闲证据 |
+| `min_hit_scans` | 8 | 最少命中扫描 | 动态抑制更强 | 静态确认更快 |
+| `min_observation_span` | 2.0 s | 最短稳定时间 | 行人更难进入，建图变慢 | 慢目标更易进入 |
+| `ray_stride` | 4 | 每N点取一条清除射线 | CPU下降、清除变慢 | CPU增加、清除更密 |
+| `max_clearing_range` | 20 m | 最大清除距离 | CPU和远处清除增加 | 远处旧点不易清除 |
+| `ray_endpoint_margin` | 0.30 m | 端点前保护距离 | 表面更安全、清除死区大 | 易误清表面 |
+| `candidate_timeout` | 5 s | 非静态候选超时 | 状态保留更久 | 临时候选更快删除 |
+| `map/voxel_size` | 0.05 m | 最终PCD细体素 | 地图稀疏 | 地图密、内存高 |
+| `map/autosave_period` | 30 s | 自动保存周期 | 数据丢失窗口大、磁盘写少 | 写盘更频繁 |
+| `max_odom_age` | 0.20 s | 点云/里程计允许时差 | 容忍延迟但位姿误差增大 | 更易跳过扫描 |
+
+### 6.2 地图生成参数
+
+| 文件/参数 | 当前值 | 输出 |
+|---|---:|---|
+| `scout_raw.yaml/resolution` | 0.05 m | `map_raw.*` |
+| `scout_raw.yaml/floor_min_z..floor_max_z` | -0.30～0.05 m | 自由地面高度 |
+| `scout_raw.yaml/obstacle_min_z..max_z` | 0.05～1.20 m | 障碍高度 |
+| `scout_raw.yaml/free_dilation_m` | 0.10 m | 地面自由区域扩展 |
+| `scout_raw.yaml/obstacle_inflation_m` | 0 | 正式navigation基础地图不固化膨胀 |
+| `scout_nav.yaml/obstacle_inflation_m` | 0.15 m | `/map_2d`参考图；正式navigation不读取 |
+
+### 6.3 NDT
+
+| 参数 | 当前值 | 说明 |
+|---|---:|---|
+| `odom_frame` | `odom` | TF child |
+| `tf_postdate_sec` | 0.50 s | 降低future extrapolation |
+| `ndt/num_threads` | 4 | NDT-OMP线程 |
+| `maximum_iterations` | 30 | 最大迭代 |
+| `voxel_leaf_size` | 0.20 m | 实时扫描降采样 |
+| `resolution` | 1.0 m | NDT网格 |
+| `transformation_epsilon` | 0.01 | 收敛阈值 |
+| `step_size` | 0.10 | 优化步长 |
+| `thresh_shift` | 0.50 m | 位移阈值 |
+| `thresh_rot` | 0.174533 rad | 约10° |
+| `min_scan_range/max_scan_range` | 0.50/50 m | 匹配点范围 |
+
+### 6.4 Navigation现状（只记录，不修改）
+
+| 文件/参数 | 当前值 |
+|---|---:|
+| `costmap_common.yaml/footprint` | 前0.370、后-0.300、左右±0.295 m |
+| `footprint_padding` | 0.03 m |
+| global/local `inflation_radius` | 0.45 m |
+| `cost_scaling_factor` | 4.0 |
+| local window | 6×6 m，0.05 m |
+| obstacle height | 0.08～1.50 m |
+| obstacle/raytrace range | 4.0/5.0 m |
+| TEB `max_vel_x` | 0.35 m/s |
+| TEB `max_vel_theta` | 1.0 rad/s |
+| TEB `min_obstacle_dist` | 0.15 m |
+| TEB `inflation_dist` | 0.35 m |
+| homotopy | false |
+
+## 7. 地图文件与frame
+
+| 文件 | 生成者 | frame | 消费者 |
+|---|---|---|---|
+| `filtered_camera_init.pcd` | mapper | `camera_init` | finalize脚本 |
+| `raw_camera_init.pcd` | finalize归档 | `camera_init` | 重生成资产 |
+| `public_map.pcd` | pcd_transform | `map` | NDT map loader |
+| `map_raw.pgm/.yaml` | pcd_to_pgm + raw配置 | `map` | navigation map_server |
+| `map.pgm/.yaml` | pcd_to_pgm + reference配置 | `map` | localization `/map_2d` |
+| `map_metadata.yaml` | finalize | 不适用 | 参数追溯 |
+
+## 8. 常见问题：症状、检查顺序、修复位置
+
+### 8.1 找不到包或launch
+
+症状：`is neither a launch file in package`。
 
 ```bash
-rosrun tf tf_echo odom base_link
+source /opt/ros/noetic/setup.bash
+source ~/livox_fastlio/devel/setup.bash
+rospack profile
+rospack find scout_system_bringup
 ```
 
+若刚执行`catkin_make --pkg`，必须重新source。修复位置不是launch内容，而是环境overlay或编译失败。
+
+### 8.2 can0不存在或底盘无数据
+
 ```bash
+rosrun scout_bringup bringup_can2usb.bash
+ip -details link show can0
+candump can0
+rostopic hz /scout/odom
+rostopic echo -n 1 /scout_status
+```
+
+依次检查USB-CAN设备名、bitrate、接口UP状态、急停和协议日志`Detected protocol: AGX_V2`。
+
+### 8.3 Livox无点云/无IMU
+
+```bash
+rostopic hz /livox/lidar
+rostopic hz /livox/imu
+rosnode info /livox_lidar_publisher2
+```
+
+检查雷达IP、Jetson网口IP、MID360 JSON、网线和是否重复启动驱动。
+
+### 8.4 FAST-LIO一直不输出Odometry
+
+```bash
+rostopic hz /Odometry
+rostopic hz /cloud_registered
+```
+
+先看是否出现`IMU Initial Done`。检查IMU数据、雷达类型、时间戳、外参和启动日志。初始阶段`No point, skip this scan`偶发一次可继续观察。
+
+### 8.5 mapper一直等待Odometry或跳过扫描
+
+日志：`waiting for FAST-LIO /Odometry`或`odometry differs by ...`。
+
+```bash
+rostopic echo -n 1 /Odometry/header
+rostopic echo -n 1 /cloud_registered/header
+```
+
+检查时间戳和frame。修复位置：FAST-LIO同步配置；不要先盲目扩大`max_odom_age`。
+
+### 8.6 mapper frame mismatch
+
+预期`/Odometry.header.frame_id`和`/cloud_registered.header.frame_id`都为`camera_init`。
+
+```bash
+rostopic echo -n 1 /Odometry/header
+rostopic echo -n 1 /cloud_registered/header
+```
+
+若不同，检查是否订错点云或上游FAST-LIO被修改。
+
+### 8.7 `/scout/static_scan`启动后短时为空
+
+贝叶斯静态条件要求至少8次命中且跨2秒。刚启动短时为空是设计行为。超过5秒仍空时检查输入点数、时间同步、`occupied_probability`和frame。
+
+### 8.8 人或其他机器人留下轨迹
+
+```bash
+rostopic hz /scout/static_map_cloud
+rosnode info /scout_pointcloud_mapper
+```
+
+操作：目标离开后让雷达继续看到原位置，观察日志`bayes_cleared`。完全遮挡位置必须换视角。若重新可见后仍不清，再基于rosbag比较miss证据；不要直接改navigation参数。
+
+### 8.9 地面出现规则孔洞
+
+检查：
+
+```bash
+rosparam get /scout_pointcloud_mapper/scan_voxel_size
+rosparam get /scout_pointcloud_mapper/map/voxel_size
+rosparam get /scout_pointcloud_mapper/dynamic_filter/voxel_size
+```
+
+正确值分别0.05、0.05、0.20。粗动态体素绝不能作为最终地图体素。旧PCD必须重新建图，修改参数不会修复既有PCD。
+
+### 8.10 PCD没有自动保存
+
+```bash
+rosparam get /scout_pointcloud_mapper/output_path
+rosparam get /scout_pointcloud_mapper/map/autosave_period
+ls -ld ~/livox_fastlio/maps/<map_name>
+```
+
+至少等待30秒并确认日志有静态点。正常Ctrl+C会最终保存；`kill -9`和断电不会执行析构保存。
+
+### 8.11 finalize_map.py失败
+
+```bash
+source ~/livox_fastlio/devel/setup.bash
+rospack find scout_map_tools
+ls -lh ~/livox_fastlio/maps/<map_name>/filtered_camera_init.pcd
+rosrun scout_map_tools finalize_map.py <map_name> --replace-raw
+```
+
+检查缺失PCD、文件权限、`pcd_transform_node`/`pcd_to_pgm_node`是否已编译、YAML格式和磁盘空间。
+
+### 8.12 public_map方向或高度错误
+
+检查`map_metadata.yaml`保存的geometry快照，并对照：
+
+```bash
+rosparam get /scout_geometry/odom_to_camera_init
 rosrun tf tf_echo odom camera_init
 ```
 
-```bash
-rosrun tf tf_echo camera_init body
-```
+修复唯一位置：`scout_system_bringup/config/scout_geometry.yaml`。修改后重新finalize；不要在命令行另写一套变换。
+
+### 8.13 cloud adapter报TF错误
 
 ```bash
+rostopic echo -n 1 /cloud_registered_body/header
+rosrun tf tf_echo body base_link
+rostopic hz /cloud_registered_base
+```
+
+启动早期单次错误可能是TF缓存尚未建立；持续错误检查`tf_manager.launch`和`extrinsics.yaml`，不要删除cloud adapter。
+
+### 8.14 pose adapter等待`odom → base_link`
+
+依次检查：
+
+```bash
+rosrun tf tf_echo odom camera_init
+rosrun tf tf_echo camera_init body
 rosrun tf tf_echo body base_link
 ```
 
+任一边缺失都会导致链断。FAST-LIO未初始化时等待属于正常；初始化后持续等待才修对应发布者。
+
+### 8.15 NDT不收敛
+
+检查顺序：
+
+1. `public_map.pcd`存在且`/map_cloud`有点；
+2. `/cloud_registered_base`有点且frame=`base_link`；
+3. `/fastlio_odom`时间持续更新；
+4. RViz初值位于真实位置附近，朝向合理；
+5. 实时点云与地图有足够重叠；
+6. 再考虑NDT参数，而不是先乱调分辨率。
+
+### 8.16 `map → odom` future extrapolation
+
 ```bash
-rosrun tf view_frames
+rosparam get /scout_global_localizer/tf_postdate_sec
+rosrun tf tf_echo map odom
 ```
 
----
+当前launch为0.50 s。还持续报错时检查系统时间、消息时间戳和是否存在第二个`map → odom`发布者。
 
+### 8.17 TF抖动或树反复跳变
 
-## 4.7 D435i TF 分支
-
-当前新增：
-
-```text
-base_link
- └── camera_link
-      ├── camera_color_frame
-      │    └── camera_color_optical_frame
-      ├── camera_depth_frame
-      │    └── camera_depth_optical_frame
-      ├── camera_gyro_frame
-      └── camera_accel_frame
+```bash
+rosrun tf tf_monitor
+rosnode list
+rosnode info /scout_global_localizer
+rosnode info /scout_base_node
 ```
 
-其中：
+确认底盘`pub_tf=false`，只有NDT发`map → odom`，只有FAST-LIO发`camera_init → body`。删除/关闭重复发布者，而不是增加第三条补偿TF。
 
-```text
-base_link -> camera_link
+### 8.18 `/map_2d`和`/nav_static_map`看起来不同
+
+这是当前设计：
+
+- `/map_2d`来自`map.yaml`，参考图固化膨胀0.15 m；
+- `/nav_static_map`来自`map_raw.yaml`，固化膨胀0，由现有costmap运行时处理。
+
+导航正常时不要为让两张显示图一样而修改navigation参数。
+
+### 8.19 move_base无全局路径
+
+```bash
+rostopic echo -n 1 /nav_static_map/header
+rosrun tf tf_echo map base_link
+rosservice call /move_base/make_plan "..."
+rostopic echo -n 1 /move_base/GlobalPlanner/plan
 ```
 
-由：
+检查目标是否在已知自由区、`allow_unknown=false`、起点/终点是否被footprint或障碍占据。导航当前已验证正常，不因单次目标失败随意改全局参数。
 
-```text
-scout_system_bringup/launch/d435i.launch
+### 8.20 TEB不发速度
+
+```bash
+rostopic hz /scout/odom
+rostopic hz /cmd_vel
+rostopic echo /move_base/status
+rostopic echo -n 1 /move_base/local_costmap/costmap
 ```
 
-中的 `tf2_ros/static_transform_publisher` 发布。
+确认NDT已收敛、目标有效、局部costmap有数据、底盘急停释放。`/fastlio_odom`不是TEB速度源。
 
-固定值：
+### 8.21 D435i无图像或负载过高
 
-```text
-x=0.27
-y=0.00
-z=0.10
-yaw=0
-pitch=0
-roll=3.14159265
+```bash
+rosnode list | grep camera
+rostopic list | grep '^/camera/'
+rostopic hz /camera/color/image_raw
+rostopic hz /camera/aligned_depth_to_color/image_raw
 ```
 
-RealSense 内部：
+无图像检查USB3、设备权限和驱动；负载高检查是否误开pointcloud、IMU、高分辨率或第二个相机节点。
 
-```text
-camera_link -> color/depth/optical/IMU frames
+## 9. 一组可复制的完整诊断命令
+
+```bash
+source /opt/ros/noetic/setup.bash
+source ~/livox_fastlio/devel/setup.bash
+
+rosnode list
+rostopic list | sort
+rosservice list | sort
+
+rostopic hz /livox/lidar
+rostopic hz /livox/imu
+rostopic hz /Odometry
+rostopic hz /cloud_registered
+rostopic hz /cloud_registered_body
+rostopic hz /scout/static_scan
+rostopic hz /scout/static_map_cloud
+rostopic hz /scout/odom
+
+rostopic echo -n 1 /cloud_registered/header
+rostopic echo -n 1 /cloud_registered_body/header
+rostopic echo -n 1 /cloud_registered_base/header
+rostopic echo -n 1 /map_cloud/header
+rostopic echo -n 1 /map_2d/header
+rostopic echo -n 1 /nav_static_map/header
+
+rosrun tf tf_echo map odom
+rosrun tf tf_echo odom camera_init
+rosrun tf tf_echo camera_init body
+rosrun tf tf_echo body base_link
+rosrun tf tf_echo map base_link
+rosrun tf tf_monitor
+
+rosparam get /scout_pointcloud_mapper
+rosparam get /scout_global_localizer
+rosparam get /move_base/global_costmap
+rosparam get /move_base/local_costmap
 ```
 
-由 `realsense2_camera` 自己发布，`d435i.launch` 中必须保持：
+## 10. 编译和生效规则速查
 
-```text
-publish_tf=true
-tf_publish_rate=0
+| 修改对象 | 是否编译 | 何时生效 |
+|---|---|---|
+| C++源码 | 是，`catkin_make -j1 --pkg <包>` | 重新source并重启节点 |
+| Python脚本内容 | 通常否 | 重启节点；新安装规则需编译 |
+| launch | 否 | 重启launch |
+| mapper YAML | 否 | 重启mapper；旧PCD不追溯修改 |
+| map tools YAML | 否 | 重新运行finalize |
+| localization参数 | 否 | 重启localization |
+| navigation参数 | 否 | 重启move_base；当前导航正常，本轮禁止修改 |
+
+完整编译：
+
+```bash
+cd ~/livox_fastlio
+source /opt/ros/noetic/setup.bash
+catkin_make -j1
+source ~/livox_fastlio/devel/setup.bash
 ```
 
-不要再增加第二套内部 TF publisher。
+## 11. 导航日志接口完整表
 
+启动：
 
-# 5. 常见问题表
+```bash
+roslaunch scout_navigation nav_logging.launch tag:=nav_test
+```
 
-| 现象 | 主要原因 | 检查方法 | 处理方式 |
-|---|---|---|---|
-| `/livox/lidar` 或 `/livox/imu` 没数据 | Mid-360 网络、配置、驱动未正常启动 | `rostopic hz /livox/lidar`；`rostopic hz /livox/imu` | 先解决 Livox 驱动，不要继续调 FAST-LIO。 |
-| FAST-LIO 没有 `/cloud_registered_body` | 激光/IMU 输入缺失，或 FAST-LIO 未正常初始化 | `rosnode list`；检查 `/livox/lidar`、`/livox/imu` | 检查 `mid360.yaml` 的话题、雷达类型及终端报错。 |
-| `odom -> base_link` 查不到 | TF Manager 或 FAST-LIO 缺失；树中任一边断开 | 分别 `tf_echo odom camera_init`、`camera_init body`、`body base_link` | 找到缺失的边，不要额外直接发布 `odom -> base_link` 绕过去。 |
-| TF 抖动、RViz 车体跳变 | 同一 TF 有多个 publisher | `rosrun tf view_frames`；检查 `rosnode info` | 保证每条 TF 只有一个发布者；底盘必须 `pub_tf=false`。 |
-| `/scout/odom` 在变化，但 TF 位姿与它不完全一样 | 当前设计中轮速里程计和 FAST-LIO 是两套位姿来源 | 比较 `/scout/odom` 和 `tf_echo odom base_link` | 正常情况下导航位姿以 TF 为准，`/scout/odom` 主要提供速度。 |
-| `/fastlio_odom` 位置正常但速度始终为 0 | `tf_to_odom.py` 明确把 twist 全部置 0 | `rostopic echo -n 1 /fastlio_odom` | 这是当前设计；不要将其作为 TEB 的 odometry velocity source。 |
-| RViz 发初始位姿后提示 `No point cloud` | localizer 尚未收到 `/cloud_registered_base` | `rostopic hz /cloud_registered_base` | 等点云链路正常后再发 2D Pose Estimate。 |
-| 尚未发送初始位姿时 `map -> odom` 看起来仍然存在 | localizer 初始化时 `_odomMap` 为单位变换，并会持续发布 | 启动后直接 `tf_echo map odom`，同时确认是否已经发过 `/initialpose` | 不要把“有 `map -> odom` TF”误认为已经完成重定位；正式使用前仍应通过 2D Pose Estimate/NDT 确认全局对齐。 |
-| NDT 不是每帧都重新匹配 | 当前代码仅在相对运动超过 0.50 m 或约 10° 时再次触发 NDT；中间持续复用并发布现有 `map -> odom` | 查看 `scout_relocalization.launch` 的 `ndt/thresh_shift`、`ndt/thresh_rot` 和 NDT 日志 | 这是当前降低计算量的设计；只有确有漂移修正需求时再调整阈值。 |
-| 发初始位姿后 NDT 不收敛或跳到错误位置 | 初始猜测过远、地图与当前环境不一致、点云过少或参数不合适 | 检查 `/map_cloud`、`/cloud_registered_base`；观察 NDT 日志 | 先给更准确初值；确认使用同一张 PCD；再调 voxel、resolution、扫描范围。 |
-| 重定位正常，但 move_base 报 TF future extrapolation | `map -> odom` 时间戳落后控制查询时刻 | 查看 move_base/TF 报错 | 当前 localizer 默认将 TF 向未来预发布 0.25 s；不要随意删除该机制。 |
-| 修改雷达安装角度/位置后旧地图无法对齐 | 车辆安装几何发生变化，但旧 PCD/map 仍使用旧变换生成 | 对比 `scout_geometry.yaml`、`extrinsics.yaml` 和 `map_metadata.yaml` | 修改外参后应重新生成 `public_map.pcd` 和 2D 地图；必要时重新建图。 |
-| 改了 `scout_geometry.yaml`，但 `body -> base_link` 仍是旧值 | 当前 `body -> base_link` 仍从 `extrinsics.yaml` 读取 | `rosparam get /scout_geometry`；`tf_echo body base_link` | **当前仍需同步检查两处配置。** 后续可把车辆安装几何进一步收敛到单一配置源。 |
-| 为什么 `scout_geometry.yaml` 和 `extrinsics.yaml` 都出现 0.25 m / 0.20 m / 45° | 当前设计分别负责 `odom -> camera_init` 和 `base_link -> body` 测量关系 | 查看两个 YAML 和 TF tree | 逻辑上不是同一条 TF，但当前安装方式下数值存在耦合；修改传感器安装时必须整体检查。 |
-| 直接把 `body -> base_link` 写成 x=-0.25、z=-0.20、pitch=-45° 后位置不对 | 含旋转的刚体逆变换不能只对每个参数取负 | 查看 `tf_manager.py` 的矩阵求逆 | 使用当前 `publish_inverse=true` 的完整矩阵求逆方式。 |
-| 2D 地图有 `map.yaml` 和 `map_raw.yaml`，不知道导航该用哪个 | 两张图用途不同 | 查看 `finalize_map.py` 和 navigation launch | localization 显示 `/map_2d` 用 `map.yaml`；导航静态层用 `map_raw.yaml`，再由 costmap inflation 做运行期膨胀。 |
-| `map_raw.yaml` 名字叫 raw，但仍不是完全未经处理的点云投影 | raw profile 仍有 `free_dilation_m: 0.10`，只是 `obstacle_inflation_m: 0.00` | 查看 `scout_raw.yaml` | “raw”在这里主要表示**不预膨胀障碍**，不要理解成原始 PCD。 |
-| 导航 local costmap 看不到实时障碍 | `/cloud_registered_body` 无数据、TF 不通或高度阈值不匹配 | `rostopic hz /cloud_registered_body`；查看 local costmap | 检查 `local_costmap.yaml` 的 `min_obstacle_height/max_obstacle_height`、topic 和 TF。 |
-| 车有规划但不动 | `/cmd_vel` 未发布、底盘未接管、CAN/控制模式异常 | `rostopic echo /cmd_vel`；`rostopic echo /scout_status` | 先确认 move_base 有速度，再检查 Scout 驱动和遥控/控制模式。 |
-| 车运动但 TEB 判断速度异常 | `/scout/odom` 实际速度异常或消息频率低 | `rostopic hz /scout/odom`；查看 twist | 底盘 odom 是当前 TEB 速度反馈，应优先检查底盘驱动。 |
-| 起点或目标贴近障碍时无法规划 | footprint、静态障碍或 inflation 后起点/终点处于不可行区域 | RViz 查看 global/local costmap | 将目标点放到可通行区域；这种情况不应通过降低安全距离强行规划。 |
-| PCD finalize 后地图与建图坐标方向不一致 | `raw_camera_init.pcd -> public_map.pcd` 的几何转换参数错误 | 查看 `map_metadata.yaml` 中 geometry snapshot | 修正 `scout_geometry.yaml` 后重新执行 finalize；不要手工对 PCD 再做第二次变换。 |
-| `finalize_map.py` 不小心覆盖原始 PCD | 使用了 `--replace-raw` | 查看终端 `[KEEP]` / `[OK]` 信息 | 默认不会替换已归档 `raw_camera_init.pcd`；只有明确需要时使用 `--replace-raw`。 |
-| 日志占磁盘很快 | `nav_logging.launch` 记录 TF、点云、costmap、TEB 等大量话题 | `du -sh ~/livox_fastlio/logs/navigation/*` | 只在测试时启动；测试结束及时 Ctrl+C，并定期归档/清理旧 bag。 |
-| D435i 在 `lsusb` 中存在但 `lsusb -t` 只有 `480M` | USB2 线/接口协商 | `lsusb -t` | 使用原装或明确支持 USB3 5Gbps 的线，连接 Jetson USB3，目标 `5000M`。 |
-| `rs-enumerate-devices` 显示 `Intel RealSense D4XX Recovery` | 相机处于固件 Recovery 模式 | `rs-enumerate-devices`；`rs-fw-update -l` | 不启动 ROS，恢复当前工程匹配固件后再测试。 |
-| `realsense2_camera` 编译提示缺少 `ddynamic_reconfigure` | ROS依赖缺失 | 查看 CMake 报错 | `sudo apt install ros-noetic-ddynamic-reconfigure`。 |
-| `rosdep` 提示未初始化 | 本机首次使用 rosdep | `rosdep install ...` 报错 | `sudo rosdep init` 后普通用户执行 `rosdep update`。 |
-| RealSense manager 报 `_ZN2cv3MatC1Ev` undefined symbol | Jetson 上 OpenCV 未显式链接 | 查看 roslaunch 终端 | 在 `realsense2_camera/CMakeLists.txt` 显式 `find_package(OpenCV REQUIRED)` 并链接 `${OpenCV_LIBRARIES}`，再干净编译。 |
-| 新终端找不到 `scout_system_bringup`，手工 source 主工作区后恢复 | `realsense_ws` 最后 source 覆盖主 catkin overlay | `rospack find scout_system_bringup`；`echo $CMAKE_PREFIX_PATH` | `.bashrc` 使用 `source ~/realsense_ws/devel/setup.bash --extend`。 |
-| RGB/Depth topic 有数据，但 RViz 报 `camera_color_optical_frame does not exist` | RealSense 内部 TF 未发布 | `tf_echo camera_link camera_color_optical_frame` | `d435i.launch` 保持 `publish_tf=true`、`tf_publish_rate=0`；不要重复手工发布内部 TF。 |
-| D435i 被两个节点重复打开 | 总 launch 已 include `d435i.launch`，同时又手工启动一次 | `rosnode list | grep camera` | 只保留一个 D435i 启动入口。 |
+节点`/nav_log_session`执行`nav_log_session.sh`。它不发布控制话题、不设置导航参数，只做快照、rosbag记录和结束分析。输出根目录为`~/livox_fastlio/logs/navigation/`，`LAST_RUN`保存最近一次运行目录。
 
----
+记录的话题分组：
 
-# 6. 当前配置中值得保留的设计约束
+- 基础：`/tf`、`/tf_static`、`/rosout_agg`、`/cmd_vel`、`/scout/odom`、`/fastlio_odom`；
+- 目标与状态：`/move_base_simple/goal`、`/move_base/{status,goal,cancel,feedback,result}`；
+- 全局路径：`/move_base/GlobalPlanner/plan`；
+- DWA诊断：`global_plan`、`local_plan`、`trajectory_cloud`、`cost_cloud`、`parameter_updates`；
+- TEB诊断：`global_plan`、`local_plan`、`teb_poses`、`teb_markers`、`teb_feedback`、`obstacles`、`via_points`、`parameter_updates`；
+- costmap：局部/全局costmap、updates、footprint和障碍/膨胀动态参数；
+- 环境输入：`/nav_static_map`、`/cloud_registered_body`。
 
-1. **同一条 TF 只能有一个 publisher。** 特别是底盘 `pub_tf=false` 必须保持。
-2. **重定位使用 `/fastlio_odom` 的 pose，不使用其 twist。**
-3. **TEB 速度反馈使用 `/scout/odom`。**
-4. **NDT 输入使用 base_link 坐标点云 `/cloud_registered_base`。**
-5. **导航静态地图使用 `map_raw.yaml`，避免静态图预膨胀与 costmap inflation 重复。**
-6. **LiDAR-IMU 内部外参与车辆 body-base_link 安装外参是两类参数，不能混为一谈。**
-7. **外参变化后，旧 `public_map.pcd` 和 2D 地图不应继续直接使用。**
-8. **D435i 必须优先保持 USB3 `5000M`，不要把 `480M` 当作正式状态。**
-9. **D435i 的 `base_link -> camera_link` 只由 `d435i.launch` 发布；RealSense 内部 TF 只由 `realsense2_camera` 发布。**
-10. **当前 D435i 默认 `align_depth=true`、`enable_pointcloud=false`，服务于目标识别/深度避障，而不是定位。**
-11. **主工作区与 `realsense_ws` 并存时，`~/.bashrc` 使用 `realsense_ws/devel/setup.bash --extend`。**
+结束后关键文件：
 
----
+| 文件 | 含义 |
+|---|---|
+| `navigation*.bag` | LZ4压缩、每2 GiB分包的原始数据 |
+| `summary.txt` | planner类型、频率、速度、轨迹、失败和底盘响应摘要 |
+| `cmd_vel.csv`、`scout_odom_twist.csv` | 指令与底盘反馈 |
+| `local_plan.csv`、`teb_poses.csv` | 局部轨迹统计 |
+| `goals.csv`、`move_base_status.csv` | 目标与状态时间线 |
+| `planner_fail_logs.csv` | 规划器失败日志 |
+| `config_snapshot/`、`launch_snapshot/`、`move_base_params.yaml` | 本次配置证据 |
+| `rosbag_info.txt`、`analysis_console.txt` | bag信息和分析错误 |
 
-# 7. 本次源码中未纳入正式文档的内容
+### 11.1 日志没有生成或无法分析
 
-本次有意不把以下内容写入正式运行步骤：
+按顺序检查：
 
-- 非 Mid-360 的 FAST-LIO/Livox 示例；
-- 上游 `fast_lio_localization` 示例 launch；
-- Gazebo、模型 display、omni 底盘示例；
-- `teb_migration_patch_V4.0` 迁移补丁目录；
-- DWA 主流程（保留作回滚/对照）；
-- 只用于专项测试的 `global_planning_test.launch`；
-- FAST-LIO 中已 advertise 但调用被注释的 `/cloud_effected`、`/Laser_map`。
+```bash
+rosnode list | grep move_base
+df -h ~
+cat ~/livox_fastlio/logs/navigation/LAST_RUN
+RUN_DIR=$(cat ~/livox_fastlio/logs/navigation/LAST_RUN)
+ls -lh "$RUN_DIR"
+cat "$RUN_DIR/analysis_console.txt"
+```
 
-这些文件可以暂时留在源码树中，但后续维护文档时应避免与当前主链路并列，否则很容易造成“到底该启动哪个 launch / 到底谁发布 TF”的歧义。
+仅有`.bag.active`通常表示未正常停止或rosbag异常退出。正常流程是在日志launch终端按一次`Ctrl+C`并等待`[NAV_LOG] DONE`。已有完整bag时可重跑：
 
----
+```bash
+rosrun scout_navigation analyze_nav_bag.py "$RUN_DIR"
+```
 
-# 8. 源码依据索引
+## 12. 开发步骤的唯一详细来源
 
-主要依据文件：
-
-- `scout_system_bringup/launch/scout_mapping.launch`
-- `scout_system_bringup/launch/scout_localization.launch`
-- `scout_system_bringup/launch/scout_relocalization.launch`
-- `scout_system_bringup/launch/fastlio_mapping_scout.launch`
-- `scout_system_bringup/launch/fastlio_local_odom.launch`
-- `scout_system_bringup/config/scout_geometry.yaml`
-- `scout_tf_manager/launch/tf_manager.launch`
-- `scout_tf_manager/config/extrinsics.yaml`
-- `scout_tf_manager/scripts/tf_manager.py`
-- `scout_tf_manager/scripts/geometry_tf_publisher.py`
-- `scout_pose_adapter/scripts/tf_to_odom.py`
-- `scout_cloud_adapter/src/cloud_frame_adapter.cpp`
-- `FAST_LIO/config/mid360.yaml`
-- `FAST_LIO/src/laserMapping.cpp`
-- `fast_lio_localization/src/fast_lio_localization.cpp`
-- `fast_lio_localization/src/map_loader.cpp`
-- `scout_map_tools/scripts/finalize_map.py`
-- `scout_map_tools/config/scout_raw.yaml`
-- `scout_map_tools/config/scout_nav.yaml`
-- `scout_navigation/launch/navigation_teb.launch`
-- `scout_navigation/config/local_costmap.yaml`
-- `scout_navigation/config/global_costmap.yaml`
-- `scout_navigation/config/teb_local_planner.yaml`
-- `scout_navigation/scripts/nav_log_session.sh`
-- `scout_ros/scout_base/src/scout_messenger.cpp`
-- `scout_system_bringup/launch/d435i.launch`
-- `~/realsense_ws/src/realsense-ros/realsense2_camera/launch/rs_camera.launch`
-- `~/realsense_ws/src/realsense-ros/realsense2_camera/CMakeLists.txt`
+本表只定义运行接口和排错事实。所有必需功能包的来源、依赖、逐文件创建/修改、CMake目标、编译、启动和验收步骤统一见《Scout Mini 自主导航机器人开发文档》第17章，避免三份文档重复粘贴代码后互相失真。

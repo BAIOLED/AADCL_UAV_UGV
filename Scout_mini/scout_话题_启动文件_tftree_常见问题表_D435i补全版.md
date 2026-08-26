@@ -638,3 +638,59 @@ source /opt/ros/noetic/setup.bash
 catkin_make -j1
 source ~/livox_fastlio/devel/setup.bash
 ```
+
+## 11. 导航日志接口完整表
+
+启动：
+
+```bash
+roslaunch scout_navigation nav_logging.launch tag:=nav_test
+```
+
+节点`/nav_log_session`执行`nav_log_session.sh`。它不发布控制话题、不设置导航参数，只做快照、rosbag记录和结束分析。输出根目录为`~/livox_fastlio/logs/navigation/`，`LAST_RUN`保存最近一次运行目录。
+
+记录的话题分组：
+
+- 基础：`/tf`、`/tf_static`、`/rosout_agg`、`/cmd_vel`、`/scout/odom`、`/fastlio_odom`；
+- 目标与状态：`/move_base_simple/goal`、`/move_base/{status,goal,cancel,feedback,result}`；
+- 全局路径：`/move_base/GlobalPlanner/plan`；
+- DWA诊断：`global_plan`、`local_plan`、`trajectory_cloud`、`cost_cloud`、`parameter_updates`；
+- TEB诊断：`global_plan`、`local_plan`、`teb_poses`、`teb_markers`、`teb_feedback`、`obstacles`、`via_points`、`parameter_updates`；
+- costmap：局部/全局costmap、updates、footprint和障碍/膨胀动态参数；
+- 环境输入：`/nav_static_map`、`/cloud_registered_body`。
+
+结束后关键文件：
+
+| 文件 | 含义 |
+|---|---|
+| `navigation*.bag` | LZ4压缩、每2 GiB分包的原始数据 |
+| `summary.txt` | planner类型、频率、速度、轨迹、失败和底盘响应摘要 |
+| `cmd_vel.csv`、`scout_odom_twist.csv` | 指令与底盘反馈 |
+| `local_plan.csv`、`teb_poses.csv` | 局部轨迹统计 |
+| `goals.csv`、`move_base_status.csv` | 目标与状态时间线 |
+| `planner_fail_logs.csv` | 规划器失败日志 |
+| `config_snapshot/`、`launch_snapshot/`、`move_base_params.yaml` | 本次配置证据 |
+| `rosbag_info.txt`、`analysis_console.txt` | bag信息和分析错误 |
+
+### 11.1 日志没有生成或无法分析
+
+按顺序检查：
+
+```bash
+rosnode list | grep move_base
+df -h ~
+cat ~/livox_fastlio/logs/navigation/LAST_RUN
+RUN_DIR=$(cat ~/livox_fastlio/logs/navigation/LAST_RUN)
+ls -lh "$RUN_DIR"
+cat "$RUN_DIR/analysis_console.txt"
+```
+
+仅有`.bag.active`通常表示未正常停止或rosbag异常退出。正常流程是在日志launch终端按一次`Ctrl+C`并等待`[NAV_LOG] DONE`。已有完整bag时可重跑：
+
+```bash
+rosrun scout_navigation analyze_nav_bag.py "$RUN_DIR"
+```
+
+## 12. 开发步骤的唯一详细来源
+
+本表只定义运行接口和排错事实。所有必需功能包的来源、依赖、逐文件创建/修改、CMake目标、编译、启动和验收步骤统一见《Scout Mini 自主导航机器人开发文档》第17章，避免三份文档重复粘贴代码后互相失真。
