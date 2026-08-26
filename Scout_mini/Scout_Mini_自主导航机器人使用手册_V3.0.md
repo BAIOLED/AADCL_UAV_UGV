@@ -58,7 +58,7 @@ ls -lh ~/livox_fastlio/maps/factory_a/
 
 应包含`filtered_camera_init.pcd`、`public_map.pcd`、两套PGM/YAML和元数据。
 
-`map.pgm`默认只预膨胀障碍`0.15 m`，运行导航时costmap还会额外计算安全代价。修改`scout_nav.yaml`后，必须重新运行本步骤才能更新已有地图。
+`map.pgm`是供`/map_2d`查看的参考图，固化膨胀为`0.15 m`。当前`navigation.launch`和`navigation_teb.launch`实际加载`map_raw.yaml`（固化膨胀为0），再由costmap按既有配置生成运行时代价，因此当前导航链中两者不会叠加。导航现状正常，不要因调整参考图而修改move_base、costmap或TEB参数。
 
 ## 3. 重定位
 

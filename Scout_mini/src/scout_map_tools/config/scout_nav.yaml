@@ -8,6 +8,7 @@ obstacle_min_z: 0.05
 obstacle_max_z: 1.20
 
 free_dilation_m: 0.10
-# Only the inflation baked into map.pgm. move_base applies an additional
-# 0.45 m graded costmap inflation around the real robot footprint at runtime.
+# Inflation baked into map.yaml/map.pgm for the /map_2d reference map.
+# Current navigation launch files intentionally load map_raw.yaml instead, so
+# changing this value does not change the current move_base navigation path.
 obstacle_inflation_m: 0.15

@@ -59,5 +59,16 @@ localization/navigation assets. Do not expect `FAST_LIO/PCD/scans.pcd`.
   it is intentionally disabled by default.
 - Prefer complete-file changes and document impact before changing TF,
   extrinsics, mapping, localization, or navigation behavior.
+- The development document must remain a reproducible file-by-file procedure:
+  name every changed file, show the code/config contract, state which catkin
+  target to build, and include launch/runtime verification. Do not reduce it to
+  an architecture summary.
+- The launch/topic/TF troubleshooting document must enumerate all supported
+  launch files, nodes, topic types, publishers/subscribers, frames, unique TF
+  owners, current parameters, and ordered diagnostic steps.
+- Current navigation behavior is validated. Do not change move_base, costmap,
+  footprint, or TEB parameters unless the user explicitly requests a navigation
+  change. `scout_nav.yaml` keeps a 0.15 m reference-map inflation, while formal
+  navigation continues to load `map_raw.yaml` and is unaffected by that value.
 - `WheelTech` is a separate undeveloped project and is out of scope unless the
   user explicitly requests work on it.
