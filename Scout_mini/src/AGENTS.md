@@ -13,8 +13,9 @@
 - FAST-LIO supplies local odometry and registered scans. Do not modify its input
   cloud or feed a processed cloud back into it.
 - `scout_pointcloud_mapper` subscribes to `/cloud_registered` and `/Odometry`,
-  filters the exported mapping cloud, accumulates confirmed static voxels, and
-  saves `filtered_camera_init.pcd` through
+  filters the exported mapping cloud, updates a reversible 3D Bayesian
+  occupancy grid with endpoint hits and sampled free-space rays, accumulates
+  eligible fine map voxels, and saves `filtered_camera_init.pcd` through
   `/scout_pointcloud_mapper/save_map`.
 - FAST-LIO native PCD saving must remain disabled in both `mid360.yaml` and
   `fastlio_mapping_scout.launch`.
@@ -51,6 +52,8 @@ localization/navigation assets. Do not expect `FAST_LIO/PCD/scans.pcd`.
 - Preserve ROS Noetic and C++14 compatibility.
 - Keep Jetson CPU, memory, and ROS bandwidth low.
 - Debug point-cloud topics must be optional and disabled by default.
+- Keep Bayesian ray tracing subsampled and range-limited for Jetson. Do not
+  replace it with per-point full-range tracing without profiling.
 - Do not add nodes or topics without a concrete runtime need.
 - Treat `self_filter` bounds as uncalibrated until measured on the real robot;
   it is intentionally disabled by default.

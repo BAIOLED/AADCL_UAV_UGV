@@ -86,10 +86,19 @@ map
 | `scan_voxel_size` | 0.05 m | 帧内轻量降采样 |
 | `radius_filter/radius` | 0.15 m | 离群邻域半径 |
 | `radius_filter/min_neighbors` | 2 | 最少邻点 |
-| `dynamic_filter/voxel_size` | 0.20 m | 仅用于时序判定 |
-| `dynamic_filter/confirm_hits` | 3 | 静态确认帧数 |
+| `dynamic_filter/voxel_size` | 0.20 m | 贝叶斯占据判断，不是地图分辨率 |
+| `dynamic_filter/hit_probability` | 0.70 | 端点命中的占据更新概率 |
+| `dynamic_filter/miss_probability` | 0.40 | 射线穿过的空闲更新概率 |
+| `dynamic_filter/occupied_probability` | 0.72 | 允许输出细地图点的占据阈值 |
+| `dynamic_filter/clearing_probability` | 0.35 | 清除体素及其旧细点的阈值 |
+| `dynamic_filter/min_hit_scans` | 8 | 最少命中扫描数 |
+| `dynamic_filter/min_observation_span` | 2.0 s | 最短稳定观测时长 |
+| `dynamic_filter/ray_stride` | 4 | 每4个点取1条清除射线，控制CPU |
+| `dynamic_filter/max_clearing_range` | 20 m | 最大空闲清除距离 |
 | `map/voxel_size` | 0.05 m | 最终地图分辨率 |
 | `map/autosave_period` | 30 s | 自动保存周期 |
+| `scout_nav.yaml/obstacle_inflation_m` | 0.15 m | 写入导航PGM的基础膨胀 |
+| global/local `inflation_radius` | 0.45 m | move_base运行时渐变代价范围 |
 
 禁止把动态判断体素当作最终地图体素。
 
@@ -130,6 +139,10 @@ rostopic echo -n 1 /map_cloud/header
 ### 地图规则孔洞
 
 1. 确认不是旧版0.20 m单体素地图；2. 确认`map/voxel_size=0.05`；3. 用新版重新建图；4. 不要继续降低密度。
+
+### 人或其他机器人留下轨迹
+
+1. 确认已启用`dynamic_filter`；2. 目标离开后重新观测其原位置；3. 查看`/scout/static_map_cloud`是否清除；4. 若仍残留，优先降低`miss_probability`或增加清除射线密度，不要直接增大最终地图体素。完全遮挡区域只有再次可见后才能清除。
 
 ### 重定位点云frame错误
 

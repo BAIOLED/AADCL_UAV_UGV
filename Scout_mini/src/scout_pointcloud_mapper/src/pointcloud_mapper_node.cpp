@@ -4,6 +4,7 @@
 #include <limits>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <boost/filesystem.hpp>
@@ -47,20 +48,24 @@ struct VoxelKeyHash {
   }
 };
 
-struct VoxelState {
-  Eigen::Vector3d sum = Eigen::Vector3d::Zero();
-  double intensity_sum = 0.0;
-  uint32_t sample_count = 0;
-  uint32_t hit_count = 0;
-  uint64_t last_scan = std::numeric_limits<uint64_t>::max();
+struct OccupancyVoxelState {
+  double log_odds = 0.0;
+  uint32_t hit_scans = 0;
+  uint32_t miss_scans = 0;
+  uint64_t last_hit_scan = std::numeric_limits<uint64_t>::max();
+  uint64_t last_miss_scan = std::numeric_limits<uint64_t>::max();
+  ros::Time first_hit;
+  ros::Time last_hit;
   ros::Time last_seen;
-  bool confirmed = false;
+  uint64_t generation = 0;
 };
 
 struct MapVoxelState {
   Eigen::Vector3d sum = Eigen::Vector3d::Zero();
   double intensity_sum = 0.0;
   uint32_t sample_count = 0;
+  VoxelKey occupancy_key{0, 0, 0};
+  uint64_t occupancy_generation = 0;
 };
 
 class PointcloudMapper {
@@ -134,7 +139,20 @@ class PointcloudMapper {
     pnh_.param("self_filter/max_z", self_max_z_, 0.25);
     pnh_.param("dynamic_filter/enable", dynamic_filter_enable_, true);
     pnh_.param("dynamic_filter/voxel_size", temporal_voxel_size_, 0.20);
-    pnh_.param("dynamic_filter/confirm_hits", confirm_hits_, 5);
+    pnh_.param("dynamic_filter/hit_probability", hit_probability_, 0.70);
+    pnh_.param("dynamic_filter/miss_probability", miss_probability_, 0.40);
+    pnh_.param("dynamic_filter/occupied_probability",
+               occupied_probability_, 0.72);
+    pnh_.param("dynamic_filter/clearing_probability",
+               clearing_probability_, 0.35);
+    pnh_.param("dynamic_filter/min_hit_scans", min_hit_scans_, 8);
+    pnh_.param("dynamic_filter/min_observation_span",
+               min_observation_span_, 2.0);
+    pnh_.param("dynamic_filter/ray_stride", ray_stride_, 4);
+    pnh_.param("dynamic_filter/max_clearing_range",
+               max_clearing_range_, 20.0);
+    pnh_.param("dynamic_filter/ray_endpoint_margin",
+               ray_endpoint_margin_, 0.30);
     pnh_.param("dynamic_filter/candidate_timeout", candidate_timeout_, 3.0);
     pnh_.param("dynamic_filter/cleanup_period", cleanup_period_, 1.0);
     int max_voxels_param = 2000000;
@@ -156,9 +174,37 @@ class PointcloudMapper {
     scan_voxel_size_ = std::max(0.01, scan_voxel_size_);
     temporal_voxel_size_ = std::max(0.01, temporal_voxel_size_);
     map_voxel_size_ = std::max(0.01, map_voxel_size_);
-    confirm_hits_ = std::max(1, confirm_hits_);
+    hit_probability_ = clampProbability(hit_probability_);
+    miss_probability_ = clampProbability(miss_probability_);
+    occupied_probability_ = clampProbability(occupied_probability_);
+    clearing_probability_ = clampProbability(clearing_probability_);
+    hit_log_odds_ = probabilityToLogOdds(hit_probability_);
+    miss_log_odds_ = probabilityToLogOdds(miss_probability_);
+    occupied_log_odds_ = probabilityToLogOdds(occupied_probability_);
+    clearing_log_odds_ = probabilityToLogOdds(clearing_probability_);
+    min_hit_scans_ = std::max(1, min_hit_scans_);
+    min_observation_span_ = std::max(0.0, min_observation_span_);
+    ray_stride_ = std::max(1, ray_stride_);
+    max_clearing_range_ = std::max(temporal_voxel_size_,
+                                   max_clearing_range_);
+    ray_endpoint_margin_ = std::max(temporal_voxel_size_,
+                                    ray_endpoint_margin_);
     map_publish_period_ = std::max(0.1, map_publish_period_);
     autosave_period_ = std::max(1.0, autosave_period_);
+
+    if (hit_log_odds_ <= 0.0 || miss_log_odds_ >= 0.0) {
+      ROS_WARN("Invalid Bayesian probabilities; using hit=0.70, miss=0.40");
+      hit_log_odds_ = probabilityToLogOdds(0.70);
+      miss_log_odds_ = probabilityToLogOdds(0.40);
+    }
+  }
+
+  static double clampProbability(double probability) {
+    return std::max(0.001, std::min(0.999, probability));
+  }
+
+  static double probabilityToLogOdds(double probability) {
+    return std::log(probability / (1.0 - probability));
   }
 
   void odomCallback(const nav_msgs::OdometryConstPtr& msg) {
@@ -170,6 +216,113 @@ class PointcloudMapper {
     return {static_cast<int64_t>(std::floor(point.x / voxel_size)),
             static_cast<int64_t>(std::floor(point.y / voxel_size)),
             static_cast<int64_t>(std::floor(point.z / voxel_size))};
+  }
+
+  VoxelKey voxelKey(const Eigen::Vector3d& point, double voxel_size) const {
+    return {static_cast<int64_t>(std::floor(point.x() / voxel_size)),
+            static_cast<int64_t>(std::floor(point.y() / voxel_size)),
+            static_cast<int64_t>(std::floor(point.z() / voxel_size))};
+  }
+
+  OccupancyVoxelState& getOrCreateOccupancy(const VoxelKey& key) {
+    const auto inserted = temporal_voxels_.emplace(
+        key, OccupancyVoxelState());
+    OccupancyVoxelState& state = inserted.first->second;
+    if (inserted.second) {
+      state.generation = next_occupancy_generation_++;
+    }
+    return state;
+  }
+
+  bool isStatic(const OccupancyVoxelState& state) const {
+    if (!dynamic_filter_enable_) {
+      return true;
+    }
+    if (state.hit_scans < static_cast<uint32_t>(min_hit_scans_) ||
+        state.log_odds < occupied_log_odds_ || state.first_hit.isZero() ||
+        state.last_hit.isZero()) {
+      return false;
+    }
+    return (state.last_hit - state.first_hit).toSec() >=
+           min_observation_span_;
+  }
+
+  void updateHit(const VoxelKey& key, const ros::Time& stamp) {
+    OccupancyVoxelState& state = getOrCreateOccupancy(key);
+    state.last_seen = stamp;
+    if (state.last_hit_scan == scan_sequence_) {
+      return;
+    }
+    state.last_hit_scan = scan_sequence_;
+    state.log_odds = std::min(max_log_odds_, state.log_odds + hit_log_odds_);
+    ++state.hit_scans;
+    if (state.first_hit.isZero()) {
+      state.first_hit = stamp;
+    }
+    state.last_hit = stamp;
+  }
+
+  void updateMiss(const VoxelKey& key, const ros::Time& stamp) {
+    auto it = temporal_voxels_.find(key);
+    if (it == temporal_voxels_.end()) {
+      return;
+    }
+    OccupancyVoxelState& state = it->second;
+    if (state.last_miss_scan == scan_sequence_) {
+      return;
+    }
+    state.last_miss_scan = scan_sequence_;
+    state.last_seen = stamp;
+    state.log_odds = std::max(min_log_odds_,
+                              state.log_odds + miss_log_odds_);
+    ++state.miss_scans;
+    if (state.log_odds <= clearing_log_odds_) {
+      temporal_voxels_.erase(it);
+      ++bayesian_cleared_voxels_;
+      dirty_ = true;
+    }
+  }
+
+  void updateFreeSpace(
+      const Eigen::Vector3d& sensor_position, const Cloud& cloud,
+      const std::unordered_set<VoxelKey, VoxelKeyHash>& occupied_this_scan,
+      const ros::Time& stamp) {
+    if (!dynamic_filter_enable_ || cloud.empty()) {
+      return;
+    }
+    for (std::size_t index = 0; index < cloud.size();
+         index += static_cast<std::size_t>(ray_stride_)) {
+      const Point& endpoint_point = cloud.points[index];
+      const Eigen::Vector3d endpoint(endpoint_point.x, endpoint_point.y,
+                                     endpoint_point.z);
+      const Eigen::Vector3d delta = endpoint - sensor_position;
+      const double full_range = delta.norm();
+      if (full_range <= ray_endpoint_margin_) {
+        continue;
+      }
+      const double clear_until = std::min(
+          max_clearing_range_, full_range - ray_endpoint_margin_);
+      if (clear_until <= temporal_voxel_size_) {
+        continue;
+      }
+      const Eigen::Vector3d direction = delta / full_range;
+      const int steps = static_cast<int>(
+          std::floor(clear_until / temporal_voxel_size_));
+      VoxelKey previous_key{std::numeric_limits<int64_t>::min(), 0, 0};
+      for (int step = 1; step <= steps; ++step) {
+        const Eigen::Vector3d sample = sensor_position +
+            direction * (step * temporal_voxel_size_);
+        const VoxelKey key = voxelKey(sample, temporal_voxel_size_);
+        if (key == previous_key) {
+          continue;
+        }
+        previous_key = key;
+        if (occupied_this_scan.find(key) != occupied_this_scan.end()) {
+          continue;
+        }
+        updateMiss(key, stamp);
+      }
+    }
   }
 
   bool getBodyTransform(const ros::Time& cloud_stamp, Eigen::Vector3d* position,
@@ -270,33 +423,49 @@ class PointcloudMapper {
     }
     ++scan_sequence_;
 
+    std::unordered_set<VoxelKey, VoxelKeyHash> occupied_this_scan;
+    occupied_this_scan.reserve(filtered->size());
+    for (const Point& point : filtered->points) {
+      occupied_this_scan.insert(voxelKey(point, temporal_voxel_size_));
+    }
+
     for (const Point& point : filtered->points) {
       const VoxelKey key = voxelKey(point, temporal_voxel_size_);
-      VoxelState& state = temporal_voxels_[key];
-      state.sum += Eigen::Vector3d(point.x, point.y, point.z);
-      state.intensity_sum += point.intensity;
-      ++state.sample_count;
-      state.last_seen = msg->header.stamp;
-      if (state.last_scan != scan_sequence_) {
-        ++state.hit_count;
-        state.last_scan = scan_sequence_;
+      if (dynamic_filter_enable_) {
+        updateHit(key, msg->header.stamp);
       }
-      if (!dynamic_filter_enable_ ||
-          state.hit_count >= static_cast<uint32_t>(confirm_hits_)) {
-        state.confirmed = true;
+      const OccupancyVoxelState* occupancy = nullptr;
+      if (dynamic_filter_enable_) {
+        occupancy = &temporal_voxels_.at(key);
       }
-      if (state.confirmed) {
+      const bool static_point = !dynamic_filter_enable_ ||
+                                (occupancy != nullptr && isStatic(*occupancy));
+      if (static_point) {
         static_scan.push_back(point);
-        const VoxelKey map_key = voxelKey(point, map_voxel_size_);
-        MapVoxelState& map_state = map_voxels_[map_key];
-        map_state.sum += Eigen::Vector3d(point.x, point.y, point.z);
-        map_state.intensity_sum += point.intensity;
-        ++map_state.sample_count;
-        dirty_ = true;
       } else if (publish_dynamic_) {
         dynamic_scan.push_back(point);
       }
+
+      const VoxelKey map_key = voxelKey(point, map_voxel_size_);
+      MapVoxelState& map_state = map_voxels_[map_key];
+      const uint64_t generation = dynamic_filter_enable_
+                                      ? occupancy->generation
+                                      : 1;
+      if (map_state.sample_count == 0 ||
+          map_state.occupancy_generation != generation) {
+        map_state = MapVoxelState();
+        map_state.occupancy_key = key;
+        map_state.occupancy_generation = generation;
+      }
+      map_state.sum += Eigen::Vector3d(point.x, point.y, point.z);
+      map_state.intensity_sum += point.intensity;
+      ++map_state.sample_count;
+      dirty_ = true;
     }
+
+
+    updateFreeSpace(position, *filtered, occupied_this_scan,
+                    msg->header.stamp);
 
     frame_id_ = msg->header.frame_id;
     last_cloud_stamp_ = msg->header.stamp;
@@ -306,10 +475,13 @@ class PointcloudMapper {
     }
     maybeCleanup(msg->header.stamp);
 
-    ROS_INFO_THROTTLE(5.0,
-                      "Mapper: input=%zu filtered=%zu static_scan=%zu voxels=%zu",
-                      input->size(), filtered->size(), static_scan.size(),
-                      map_voxels_.size());
+    ROS_INFO_THROTTLE(
+        5.0,
+        "Mapper: input=%zu filtered=%zu static_scan=%zu map=%zu occupancy=%zu "
+        "bayes_cleared=%llu",
+        input->size(), filtered->size(), static_scan.size(),
+        map_voxels_.size(), temporal_voxels_.size(),
+        static_cast<unsigned long long>(bayesian_cleared_voxels_));
   }
 
   void publishCloud(const Cloud& cloud, const ros::Publisher& publisher,
@@ -320,13 +492,28 @@ class PointcloudMapper {
     publisher.publish(output);
   }
 
-  Cloud buildMapCloud() const {
+  Cloud buildMapCloud() {
     Cloud map;
     map.reserve(map_voxels_.size());
-    for (const auto& entry : map_voxels_) {
-      const MapVoxelState& state = entry.second;
+    for (auto it = map_voxels_.begin(); it != map_voxels_.end();) {
+      const MapVoxelState& state = it->second;
       if (state.sample_count == 0) {
+        it = map_voxels_.erase(it);
         continue;
+      }
+      if (dynamic_filter_enable_) {
+        const auto occupancy_it = temporal_voxels_.find(state.occupancy_key);
+        if (occupancy_it == temporal_voxels_.end() ||
+            occupancy_it->second.generation !=
+                state.occupancy_generation) {
+          it = map_voxels_.erase(it);
+          dirty_ = true;
+          continue;
+        }
+        if (!isStatic(occupancy_it->second)) {
+          ++it;
+          continue;
+        }
       }
       Point point;
       const Eigen::Vector3d mean = state.sum / state.sample_count;
@@ -336,6 +523,7 @@ class PointcloudMapper {
       point.intensity =
           static_cast<float>(state.intensity_sum / state.sample_count);
       map.push_back(point);
+      ++it;
     }
     map.width = static_cast<uint32_t>(map.size());
     map.height = 1;
@@ -352,7 +540,8 @@ class PointcloudMapper {
     last_cleanup_ = now;
     for (auto it = temporal_voxels_.begin();
          it != temporal_voxels_.end();) {
-      const bool expired = !it->second.confirmed &&
+      const bool expired = !isStatic(it->second) &&
+                           !it->second.last_seen.isZero() &&
                            (now - it->second.last_seen).toSec() >
                                candidate_timeout_;
       if (expired) {
@@ -436,6 +625,7 @@ class PointcloudMapper {
     map_voxels_.clear();
     frame_id_.clear();
     scan_sequence_ = 0;
+    bayesian_cleared_voxels_ = 0;
     dirty_ = false;
     ROS_WARN("scout_pointcloud_mapper map was reset");
     return true;
@@ -475,7 +665,21 @@ class PointcloudMapper {
   double self_max_z_ = 0.25;
   bool dynamic_filter_enable_ = true;
   double temporal_voxel_size_ = 0.20;
-  int confirm_hits_ = 5;
+  double hit_probability_ = 0.70;
+  double miss_probability_ = 0.40;
+  double occupied_probability_ = 0.72;
+  double clearing_probability_ = 0.35;
+  double hit_log_odds_ = 0.0;
+  double miss_log_odds_ = 0.0;
+  double occupied_log_odds_ = 0.0;
+  double clearing_log_odds_ = 0.0;
+  const double min_log_odds_ = -4.0;
+  const double max_log_odds_ = 4.0;
+  int min_hit_scans_ = 8;
+  double min_observation_span_ = 2.0;
+  int ray_stride_ = 4;
+  double max_clearing_range_ = 20.0;
+  double ray_endpoint_margin_ = 0.30;
   double candidate_timeout_ = 3.0;
   double cleanup_period_ = 1.0;
   std::size_t max_voxels_ = 2000000;
@@ -490,10 +694,13 @@ class PointcloudMapper {
   nav_msgs::Odometry latest_odom_;
   bool have_odom_ = false;
   uint64_t scan_sequence_ = 0;
+  uint64_t next_occupancy_generation_ = 1;
+  uint64_t bayesian_cleared_voxels_ = 0;
   ros::Time last_cleanup_;
   ros::Time last_cloud_stamp_;
   bool dirty_ = false;
-  std::unordered_map<VoxelKey, VoxelState, VoxelKeyHash> temporal_voxels_;
+  std::unordered_map<VoxelKey, OccupancyVoxelState, VoxelKeyHash>
+      temporal_voxels_;
   std::unordered_map<VoxelKey, MapVoxelState, VoxelKeyHash> map_voxels_;
 };
 

@@ -22,7 +22,7 @@ FAST-LIO：去畸变、里程计、扫描配准
         ↓ /cloud_registered + /Odometry
 scout_pointcloud_mapper
         ├─ 距离、非有限值、离群点过滤
-        ├─ 时序动态候选判断
+        ├─ 三维贝叶斯占据与射线清除
         ├─ 0.05 m细地图累积
         ├─ /scout/static_scan
         ├─ /scout/static_map_cloud
@@ -43,6 +43,8 @@ filtered_camera_init.pcd
 ```
 
 PCD建图自动完成。首次需要定位/导航资产时运行一次`finalize_map.py`；它是地图格式转换，不是点云预处理。
+
+导航PGM生成参数`scout_map_tools/config/scout_nav.yaml`中的`obstacle_inflation_m=0.15`只负责写入地图的基础障碍膨胀。move_base运行时还会按全局/局部costmap的`inflation_radius=0.45`结合真实footprint生成渐变代价，二者不可混为同一个参数。修改PGM膨胀后，已有地图必须重新执行`finalize_map.py`。
 
 ### 2.3 重定位与导航
 
@@ -81,11 +83,11 @@ FAST-LIO已有Livox有效点筛选、盲区过滤、抽点、IMU去畸变和匹�
 → 可选车体包围盒
 → 0.05 m帧内体素
 → 半径离群点过滤
-→ 0.20 m时序持续性判断
+→ 0.20 m贝叶斯占据网格（端点命中、射线空闲）
 → 0.05 m独立地图累积
 ```
 
-动态判定体素和地图存储体素必须分离。粗时序体素只回答“该区域是否跨帧稳定存在”，不能直接作为输出地图分辨率，否则地面和墙面会产生规则孔洞。
+动态判定体素和地图存储体素必须分离。粗体素维护可逆占据概率：扫描端点提高log-odds，射线穿过降低log-odds；达到占据阈值、最少命中次数和最短观测时长后，关联的0.05 m细体素才输出。体素被反复观测为空闲后会删除，其旧细点也会失效，避免行人和其他机器人留下永久轨迹。粗体素不能直接作为输出地图分辨率，否则地面和墙面会产生规则孔洞。
 
 ```yaml
 scan_voxel_size: 0.05
@@ -94,14 +96,22 @@ radius_filter:
   min_neighbors: 2
 dynamic_filter:
   voxel_size: 0.20
-  confirm_hits: 3
+  hit_probability: 0.70
+  miss_probability: 0.40
+  occupied_probability: 0.72
+  clearing_probability: 0.35
+  min_hit_scans: 8
+  min_observation_span: 2.0
+  ray_stride: 4
+  max_clearing_range: 20.0
+  ray_endpoint_margin: 0.30
 map:
   voxel_size: 0.05
   autosave_period: 30.0
   save_on_shutdown: true
 ```
 
-车体过滤边界尚未实测，默认关闭。当前时序方法适合剔除短时横穿目标；长时间静止的人仍可能成为静态结构，后续应通过射线可见性或语义检测增强，不能简单继续加大体素。
+车体过滤边界尚未实测，默认关闭。贝叶斯清除依赖“目标离开后，雷达射线再次穿过原位置”；完全遮挡且不再经过的区域无法凭空判断为空闲。结束建图前应回看动态目标经过区域。多机联合建图还应进一步共享机器人位姿并剔除其他机器人包围盒，贝叶斯更新负责清理漏检轨迹，但不替代多机互相屏蔽。
 
 ## 5. TF唯一性
 

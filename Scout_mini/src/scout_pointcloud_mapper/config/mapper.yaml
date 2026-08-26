@@ -28,11 +28,21 @@ self_filter:
 
 dynamic_filter:
   enable: true
-  # This coarse grid is used only to decide temporal persistence. It is not
-  # the output-map resolution.
+  # Lightweight 3D Bayesian occupancy grid. Hits raise occupancy confidence;
+  # rays that pass through a voxel lower it and remove departed objects.
+  # This coarse grid is not the output-map resolution.
   voxel_size: 0.20
-  confirm_hits: 3
-  candidate_timeout: 3.0
+  hit_probability: 0.70
+  miss_probability: 0.40
+  occupied_probability: 0.72
+  clearing_probability: 0.35
+  min_hit_scans: 8
+  min_observation_span: 2.0
+  # Trace one in every four filtered points to control Jetson CPU load.
+  ray_stride: 4
+  max_clearing_range: 20.0
+  ray_endpoint_margin: 0.30
+  candidate_timeout: 5.0
   cleanup_period: 1.0
   max_voxels: 2000000
 

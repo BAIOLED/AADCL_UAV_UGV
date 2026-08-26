@@ -33,7 +33,8 @@ launch自动启动Mid-360、FAST-LIO、点云过滤和静态地图累积，持�
 
 - 低速、平稳驾驶，避免急转和碰撞；
 - 从不同方向覆盖门口、拐角和走廊；
-- 避免人员或推车在雷达前长时间停留。
+- 人员、推车或其他机器人离开后，再次驶过或回看原区域，让空闲射线清除残留；
+- 长时间静止目标仍可能暂时进入地图，确认其离开并被重新观测后再结束建图。
 
 ```bash
 rostopic hz /cloud_registered
@@ -56,6 +57,8 @@ ls -lh ~/livox_fastlio/maps/factory_a/
 ```
 
 应包含`filtered_camera_init.pcd`、`public_map.pcd`、两套PGM/YAML和元数据。
+
+`map.pgm`默认只预膨胀障碍`0.15 m`，运行导航时costmap还会额外计算安全代价。修改`scout_nav.yaml`后，必须重新运行本步骤才能更新已有地图。
 
 ## 3. 重定位
 

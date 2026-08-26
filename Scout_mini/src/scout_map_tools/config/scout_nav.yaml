@@ -8,5 +8,6 @@ obstacle_min_z: 0.05
 obstacle_max_z: 1.20
 
 free_dilation_m: 0.10
-obstacle_inflation_m: 0.30
-
+# Only the inflation baked into map.pgm. move_base applies an additional
+# 0.45 m graded costmap inflation around the real robot footprint at runtime.
+obstacle_inflation_m: 0.15
