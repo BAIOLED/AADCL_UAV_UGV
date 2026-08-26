@@ -45,7 +45,6 @@ target_link_libraries(
 catkin_install_python(
   PROGRAMS
     scripts/finalize_map.py
-    scripts/finish_mapping.py
   DESTINATION
     ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

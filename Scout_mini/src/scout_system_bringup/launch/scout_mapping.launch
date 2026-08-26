@@ -15,17 +15,6 @@
     <arg name="map_name" value="$(arg map_name)" />
   </include>
 
-  <!-- One service completes both filtered PCD saving and map finalization. -->
-  <node pkg="scout_map_tools"
-        type="finish_mapping.py"
-        name="scout_mapping_finisher"
-        output="screen"
-        required="true">
-    <param name="map_name" value="$(arg map_name)" />
-    <param name="mapper_save_service"
-           value="/scout_pointcloud_mapper/save_map" />
-  </node>
-
   <!-- 4. TF -->
   <include file="$(find scout_tf_manager)/launch/tf_manager.launch" />
 

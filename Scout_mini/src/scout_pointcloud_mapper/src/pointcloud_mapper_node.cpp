@@ -57,6 +57,12 @@ struct VoxelState {
   bool confirmed = false;
 };
 
+struct MapVoxelState {
+  Eigen::Vector3d sum = Eigen::Vector3d::Zero();
+  double intensity_sum = 0.0;
+  uint32_t sample_count = 0;
+};
+
 class PointcloudMapper {
  public:
   PointcloudMapper() : nh_(), pnh_("~") {
@@ -81,9 +87,23 @@ class PointcloudMapper {
     publish_timer_ = nh_.createTimer(
         ros::Duration(map_publish_period_),
         &PointcloudMapper::publishMapTimer, this);
+    autosave_timer_ = nh_.createTimer(
+        ros::Duration(autosave_period_),
+        &PointcloudMapper::autosaveTimer, this);
 
     ROS_INFO_STREAM("scout_pointcloud_mapper: " << input_cloud_ << " + "
                     << input_odom_ << " -> " << output_path_);
+  }
+
+  ~PointcloudMapper() {
+    if (save_on_shutdown_ && dirty_) {
+      std::string message;
+      if (!saveMapToDisk(&message)) {
+        ROS_ERROR_STREAM("Final filtered-map save failed: " << message);
+      } else {
+        ROS_INFO_STREAM(message);
+      }
+    }
   }
 
  private:
@@ -120,6 +140,13 @@ class PointcloudMapper {
     int max_voxels_param = 2000000;
     pnh_.param("dynamic_filter/max_voxels", max_voxels_param, 2000000);
     max_voxels_ = static_cast<std::size_t>(std::max(1, max_voxels_param));
+    pnh_.param("map/voxel_size", map_voxel_size_, 0.05);
+    int max_map_voxels_param = 5000000;
+    pnh_.param("map/max_voxels", max_map_voxels_param, 5000000);
+    max_map_voxels_ =
+        static_cast<std::size_t>(std::max(1, max_map_voxels_param));
+    pnh_.param("map/autosave_period", autosave_period_, 30.0);
+    pnh_.param("map/save_on_shutdown", save_on_shutdown_, true);
     pnh_.param("map_publish_period", map_publish_period_, 2.0);
     pnh_.param("publish_dynamic_points", publish_dynamic_, false);
     pnh_.param("max_odom_age", max_odom_age_, 0.20);
@@ -128,8 +155,10 @@ class PointcloudMapper {
     max_range_ = std::max(min_range_, max_range_);
     scan_voxel_size_ = std::max(0.01, scan_voxel_size_);
     temporal_voxel_size_ = std::max(0.01, temporal_voxel_size_);
+    map_voxel_size_ = std::max(0.01, map_voxel_size_);
     confirm_hits_ = std::max(1, confirm_hits_);
     map_publish_period_ = std::max(0.1, map_publish_period_);
+    autosave_period_ = std::max(1.0, autosave_period_);
   }
 
   void odomCallback(const nav_msgs::OdometryConstPtr& msg) {
@@ -137,10 +166,10 @@ class PointcloudMapper {
     have_odom_ = true;
   }
 
-  VoxelKey voxelKey(const Point& point) const {
-    return {static_cast<int64_t>(std::floor(point.x / temporal_voxel_size_)),
-            static_cast<int64_t>(std::floor(point.y / temporal_voxel_size_)),
-            static_cast<int64_t>(std::floor(point.z / temporal_voxel_size_))};
+  VoxelKey voxelKey(const Point& point, double voxel_size) const {
+    return {static_cast<int64_t>(std::floor(point.x / voxel_size)),
+            static_cast<int64_t>(std::floor(point.y / voxel_size)),
+            static_cast<int64_t>(std::floor(point.z / voxel_size))};
   }
 
   bool getBodyTransform(const ros::Time& cloud_stamp, Eigen::Vector3d* position,
@@ -242,8 +271,8 @@ class PointcloudMapper {
     ++scan_sequence_;
 
     for (const Point& point : filtered->points) {
-      const VoxelKey key = voxelKey(point);
-      VoxelState& state = voxels_[key];
+      const VoxelKey key = voxelKey(point, temporal_voxel_size_);
+      VoxelState& state = temporal_voxels_[key];
       state.sum += Eigen::Vector3d(point.x, point.y, point.z);
       state.intensity_sum += point.intensity;
       ++state.sample_count;
@@ -258,6 +287,12 @@ class PointcloudMapper {
       }
       if (state.confirmed) {
         static_scan.push_back(point);
+        const VoxelKey map_key = voxelKey(point, map_voxel_size_);
+        MapVoxelState& map_state = map_voxels_[map_key];
+        map_state.sum += Eigen::Vector3d(point.x, point.y, point.z);
+        map_state.intensity_sum += point.intensity;
+        ++map_state.sample_count;
+        dirty_ = true;
       } else if (publish_dynamic_) {
         dynamic_scan.push_back(point);
       }
@@ -274,7 +309,7 @@ class PointcloudMapper {
     ROS_INFO_THROTTLE(5.0,
                       "Mapper: input=%zu filtered=%zu static_scan=%zu voxels=%zu",
                       input->size(), filtered->size(), static_scan.size(),
-                      voxels_.size());
+                      map_voxels_.size());
   }
 
   void publishCloud(const Cloud& cloud, const ros::Publisher& publisher,
@@ -287,10 +322,10 @@ class PointcloudMapper {
 
   Cloud buildMapCloud() const {
     Cloud map;
-    map.reserve(voxels_.size());
-    for (const auto& entry : voxels_) {
-      const VoxelState& state = entry.second;
-      if (!state.confirmed || state.sample_count == 0) {
+    map.reserve(map_voxels_.size());
+    for (const auto& entry : map_voxels_) {
+      const MapVoxelState& state = entry.second;
+      if (state.sample_count == 0) {
         continue;
       }
       Point point;
@@ -311,25 +346,31 @@ class PointcloudMapper {
   void maybeCleanup(const ros::Time& now) {
     if (!last_cleanup_.isZero() &&
         (now - last_cleanup_).toSec() < cleanup_period_ &&
-        voxels_.size() <= max_voxels_) {
+        temporal_voxels_.size() <= max_voxels_) {
       return;
     }
     last_cleanup_ = now;
-    for (auto it = voxels_.begin(); it != voxels_.end();) {
+    for (auto it = temporal_voxels_.begin();
+         it != temporal_voxels_.end();) {
       const bool expired = !it->second.confirmed &&
                            (now - it->second.last_seen).toSec() >
                                candidate_timeout_;
       if (expired) {
-        it = voxels_.erase(it);
+        it = temporal_voxels_.erase(it);
       } else {
         ++it;
       }
     }
-    if (voxels_.size() > max_voxels_) {
+    if (temporal_voxels_.size() > max_voxels_) {
       ROS_ERROR_THROTTLE(
           5.0, "Mapper voxel limit exceeded (%zu > %zu); save/reset or raise "
                "dynamic_filter/max_voxels",
-          voxels_.size(), max_voxels_);
+          temporal_voxels_.size(), max_voxels_);
+    }
+    if (map_voxels_.size() > max_map_voxels_) {
+      ROS_ERROR_THROTTLE(
+          5.0, "Mapper fine-map voxel limit exceeded (%zu > %zu)",
+          map_voxels_.size(), max_map_voxels_);
     }
   }
 
@@ -346,11 +387,18 @@ class PointcloudMapper {
 
   bool saveMap(std_srvs::Trigger::Request&,
                std_srvs::Trigger::Response& response) {
+    response.success = saveMapToDisk(&response.message);
+    if (response.success) {
+      ROS_INFO_STREAM(response.message);
+    }
+    return true;
+  }
+
+  bool saveMapToDisk(std::string* message) {
     const Cloud map = buildMapCloud();
     if (map.empty()) {
-      response.success = false;
-      response.message = "No confirmed static voxels are available";
-      return true;
+      *message = "No confirmed static map points are available";
+      return false;
     }
     try {
       const boost::filesystem::path output(output_path_);
@@ -358,26 +406,37 @@ class PointcloudMapper {
         boost::filesystem::create_directories(output.parent_path());
       }
       if (pcl::io::savePCDFileBinary(output_path_, map) != 0) {
-        response.success = false;
-        response.message = "PCL failed to write " + output_path_;
-        return true;
+        *message = "PCL failed to write " + output_path_;
+        return false;
       }
     } catch (const std::exception& error) {
-      response.success = false;
-      response.message = error.what();
-      return true;
+      *message = error.what();
+      return false;
     }
-    response.success = true;
-    response.message = "Saved " + std::to_string(map.size()) +
-                       " static voxels to " + output_path_;
-    ROS_INFO_STREAM(response.message);
+    dirty_ = false;
+    *message = "Saved " + std::to_string(map.size()) +
+               " fine static-map points to " + output_path_;
     return true;
   }
 
+  void autosaveTimer(const ros::TimerEvent&) {
+    if (!dirty_) {
+      return;
+    }
+    std::string message;
+    if (!saveMapToDisk(&message)) {
+      ROS_ERROR_STREAM_THROTTLE(5.0, "Automatic map save failed: " << message);
+    } else {
+      ROS_INFO_STREAM(message);
+    }
+  }
+
   bool resetMap(std_srvs::Empty::Request&, std_srvs::Empty::Response&) {
-    voxels_.clear();
+    temporal_voxels_.clear();
+    map_voxels_.clear();
     frame_id_.clear();
     scan_sequence_ = 0;
+    dirty_ = false;
     ROS_WARN("scout_pointcloud_mapper map was reset");
     return true;
   }
@@ -392,6 +451,7 @@ class PointcloudMapper {
   ros::ServiceServer save_service_;
   ros::ServiceServer reset_service_;
   ros::Timer publish_timer_;
+  ros::Timer autosave_timer_;
 
   std::string input_cloud_;
   std::string input_odom_;
@@ -419,6 +479,10 @@ class PointcloudMapper {
   double candidate_timeout_ = 3.0;
   double cleanup_period_ = 1.0;
   std::size_t max_voxels_ = 2000000;
+  double map_voxel_size_ = 0.05;
+  std::size_t max_map_voxels_ = 5000000;
+  double autosave_period_ = 30.0;
+  bool save_on_shutdown_ = true;
   double map_publish_period_ = 2.0;
   bool publish_dynamic_ = false;
   double max_odom_age_ = 0.20;
@@ -428,7 +492,9 @@ class PointcloudMapper {
   uint64_t scan_sequence_ = 0;
   ros::Time last_cleanup_;
   ros::Time last_cloud_stamp_;
-  std::unordered_map<VoxelKey, VoxelState, VoxelKeyHash> voxels_;
+  bool dirty_ = false;
+  std::unordered_map<VoxelKey, VoxelState, VoxelKeyHash> temporal_voxels_;
+  std::unordered_map<VoxelKey, MapVoxelState, VoxelKeyHash> map_voxels_;
 };
 
 }  // namespace

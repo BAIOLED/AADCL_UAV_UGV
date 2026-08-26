@@ -21,6 +21,8 @@
       output="screen">
 
     <param name="odom_frame" value="odom" />
+    <!-- Postdate map->odom enough for move_base/costmap future queries. -->
+    <param name="tf_postdate_sec" value="0.50" />
 
     <param name="ndt/debug" value="true" />
     <param name="ndt/num_threads" value="4" />
@@ -40,4 +42,3 @@
   </node>
 
 </launch>
-

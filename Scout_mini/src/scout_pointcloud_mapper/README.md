@@ -4,16 +4,10 @@ This node subscribes to FAST-LIO's registered world-frame scan and odometry,
 filters outliers and short-lived temporal voxels, and accumulates the confirmed
 static voxels. It does not publish TF and never feeds points back to FAST-LIO.
 
-The normal one-key mapping launch starts this node and the map finalizer. Finish
-the current map before stopping mapping with:
-
-```bash
-rosservice call /finish_mapping
-```
-
-This saves the filtered PCD and automatically runs `finalize_map.py`. The lower
-level `/scout_pointcloud_mapper/save_map` service remains available for recovery
-and diagnostics, but it does not generate the public PCD or occupancy maps.
+The normal mapping launch starts this node automatically. It saves the filtered
+PCD every 30 seconds and once more during a normal shutdown, so no save service
+is needed in the normal workflow. `/scout_pointcloud_mapper/save_map` remains
+available for diagnostics only.
 
 Reset all candidate and confirmed voxels:
 
@@ -33,5 +27,6 @@ The default mapping launch writes to:
 ~/livox_fastlio/maps/current_mapping/filtered_camera_init.pcd
 ```
 
-The named launch above writes all results below
-`~/livox_fastlio/maps/scout_map_01/`.
+The named launch writes `filtered_camera_init.pcd` below
+`~/livox_fastlio/maps/scout_map_01/`. Run `finalize_map.py` once when converting
+that PCD into localization and navigation assets.

@@ -8,11 +8,11 @@ dynamic_topic: /scout/dynamic_points
 # affect the exported map; they never feed points back into FAST-LIO.
 min_range: 0.50
 max_range: 50.0
-scan_voxel_size: 0.10
+scan_voxel_size: 0.05
 
 radius_filter:
   enable: true
-  radius: 0.20
+  radius: 0.15
   min_neighbors: 2
 
 # Coordinates are in the FAST-LIO body frame obtained from /Odometry.
@@ -28,11 +28,21 @@ self_filter:
 
 dynamic_filter:
   enable: true
+  # This coarse grid is used only to decide temporal persistence. It is not
+  # the output-map resolution.
   voxel_size: 0.20
-  confirm_hits: 5
+  confirm_hits: 3
   candidate_timeout: 3.0
   cleanup_period: 1.0
   max_voxels: 2000000
+
+# Confirmed points are accumulated in this independent fine grid. Keeping this
+# separate from dynamic_filter/voxel_size avoids regular holes in floors/walls.
+map:
+  voxel_size: 0.05
+  max_voxels: 5000000
+  autosave_period: 30.0
+  save_on_shutdown: true
 
 map_publish_period: 2.0
 publish_dynamic_points: false
