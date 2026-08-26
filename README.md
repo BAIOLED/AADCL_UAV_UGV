@@ -1,6 +1,15 @@
 # AADCL UAV / UGV
 
-本仓库用于保存AADCL无人机与无人车项目代码。当前已开发并持续维护的UGV项目为`Scout_mini`；其他平台代码在完成方案确认前不与Scout Mini工程混用。
+本仓库是AADCL无人机与无人车项目的统一代码仓库。目前包含两个并列的UGV子项目：`Scout_mini`和`WheelTech`。两套工程属于同一总体项目，但因底盘、驱动、参数和部署环境不同，分别在各自目录中独立维护。
+
+## 子项目入口
+
+| 子项目 | 目录 | 说明 |
+|---|---|---|
+| Scout Mini | [`Scout_mini/`](Scout_mini/) | AgileX Scout Mini自主建图、重定位与导航系统 |
+| WheelTech | [`WheelTech/`](WheelTech/) | 轮趣平台对应的建图与导航系统，具体状态以其目录文档为准 |
+
+仓库根目录只提供总入口。平台相关源码、参数、Launch和文档必须保存在对应子目录中，不能直接把Scout Mini参数复制到WheelTech，反之亦然。
 
 ## Scout Mini自主导航机器人
 
