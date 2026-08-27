@@ -1,9 +1,10 @@
-# Scout Mini 启动文件、节点、话题、TF与常见问题完整表
+# Scout Mini 启动文件、节点、话题、TF与常见问题完整表 V3.1
 
 > 本表按当前源码逐项整理。车端工作空间：`~/livox_fastlio`。
 > 正式建图入口：`scout_mapping.launch`；正式定位入口：`scout_localization.launch`；正式导航入口：`navigation_teb.launch`。
 > 导航当前工作正常，本表只记录现状，不要求修改navigation参数。
 > 审计范围：Scout正式链路、项目自研辅助包、仓库内会影响Scout运行的上游/示例Launch；通用ROS基础话题（如每个节点都有的`/rosout`）单独说明，不冒充业务接口。
+> V3.1：完成源码反向审计，补齐上游/示例Launch边界、条件性话题、NDT重映射、Action/服务、动态参数、完整配置值和实机复核流程。
 
 ## 1. 工作模式与禁止同时启动项
 
