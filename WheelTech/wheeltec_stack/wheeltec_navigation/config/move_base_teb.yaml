@@ -13,7 +13,8 @@ controller_patience: 5.0
 recovery_behavior_enabled: false
 clearing_rotation_allowed: false
 
-oscillation_timeout: 5.0
-oscillation_distance: 0.20
+# 轮趣原地转向角加速度较低，先给 TEB 自身振荡恢复足够时间。
+oscillation_timeout: 20.0
+oscillation_distance: 0.05
 
 shutdown_costmaps: false

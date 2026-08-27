@@ -13,7 +13,8 @@ controller_patience: 5.0
 recovery_behavior_enabled: false
 clearing_rotation_allowed: false
 
-oscillation_timeout: 5.0
-oscillation_distance: 0.20
+# 轮趣原地转向角加速度较低，避免 move_base 过早中止目标。
+oscillation_timeout: 20.0
+oscillation_distance: 0.05
 
 shutdown_costmaps: false

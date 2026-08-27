@@ -7,7 +7,7 @@
 | 子项目 | 目录 | 说明 |
 |---|---|---|
 | Scout Mini | [`Scout_mini/`](Scout_mini/) | AgileX Scout Mini自主建图、重定位与导航系统 |
-| WheelTech | [`WheelTech/`](WheelTech/) | 轮趣平台对应的建图与导航系统，具体状态以其目录文档为准 |
+| WheelTech | [`WheelTech/`](WheelTech/) | 轮趣平台建图与导航系统；详见[详细信息表 V3.1](WheelTech/docs/轮趣四轮差速机器人_详细信息表_V3.1.md) |
 
 仓库根目录只提供总入口。平台相关源码、参数、Launch和文档必须保存在对应子目录中，不能直接把Scout Mini参数复制到WheelTech，反之亦然。
 
