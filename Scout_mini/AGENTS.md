@@ -76,5 +76,7 @@ localization/navigation assets. Do not expect `FAST_LIO/PCD/scans.pcd`.
   footprint, or TEB parameters unless the user explicitly requests a navigation
   change. `scout_nav.yaml` keeps a 0.15 m reference-map inflation, while formal
   navigation continues to load `map_raw.yaml` and is unaffected by that value.
-- `WheelTech` is a separate undeveloped project and is out of scope unless the
-  user explicitly requests work on it.
+- `Scout_mini` and `WheelTech` are sibling subprojects in the same AADCL Git
+  repository. This instruction file governs only `Scout_mini`; preserve
+  concurrent `WheelTech` work and do not modify its files unless the user
+  explicitly requests cross-project work.

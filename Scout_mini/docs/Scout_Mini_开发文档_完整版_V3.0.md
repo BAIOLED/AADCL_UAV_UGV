@@ -2,6 +2,8 @@
 
 > 适用平台：AgileX Scout Mini、Jetson、Ubuntu 20.04、ROS Noetic、Livox Mid-360、Intel RealSense D435i。
 > 车端工作空间：`~/livox_fastlio`。
+> Git仓库克隆：`~/github_upload/AADCL_UAV_UGV`；Scout源码位于仓库的`Scout_mini/`子目录。
+> 本手册在仓库中的路径：`Scout_mini/docs/Scout_Mini_开发文档_完整版_V3.0.md`。
 > 本文按“从源码修改到实车验证”的顺序记录，每项给出实际文件、写入内容、编译目标和验证命令。
 > 本文覆盖底盘、雷达、里程计、TF、静态点云建图、地图转换、重定位、导航、相机、测试和日志全部必需功能包；第17章是逐包从零恢复清单。
 
@@ -43,8 +45,34 @@ map_raw.yaml + TF + /scout/odom + 实时障碍点云 → move_base + TEB → /cm
 - FAST-LIO原生PCD保存必须关闭。
 - mapper不发布TF；每条TF只能有一个发布者。
 - D435i当前未并入激光PCD建图链。
+- `Scout_mini`与`WheelTech`是AADCL同一仓库中的并列子项目；本手册只定义Scout Mini的开发与验收。
+- 两个子项目可以共享上游算法思路，但底盘驱动、外参、话题、Launch和导航参数必须分别维护，不能跨目录直接覆盖。
 
 ## 2. 源码目录与职责
+
+Git仓库与车端运行工作空间是两个不同位置：
+
+```text
+~/github_upload/AADCL_UAV_UGV/       # Git提交与推送目录
+├─ README.md                         # 整个AADCL仓库入口
+├─ Scout_mini/                       # 本手册负责的子项目
+│  ├─ AGENTS.md
+│  ├─ docs/*_V3.0.md
+│  └─ src/
+└─ WheelTech/                        # 并列子项目，由其自身文档和开发流程维护
+
+~/livox_fastlio/                     # Scout Mini实车编译、运行和地图目录
+├─ AGENTS.md
+├─ src/
+├─ build/
+├─ devel/
+├─ maps/
+└─ logs/
+```
+
+开发时先在`~/livox_fastlio`修改和实车验证，再把应提交的源码与文档同步到Git克隆的`Scout_mini/`。Git操作必须在`~/github_upload/AADCL_UAV_UGV`执行。`WheelTech/`的改动不属于本手册交付范围。
+
+Scout Mini车端工作空间内部结构：
 
 ```text
 ~/livox_fastlio/
@@ -606,6 +634,37 @@ transform_tolerance: 0.5
 | `min_obstacle_dist` | 0.15 m | footprint边界净空 |
 | `inflation_dist` | 0.35 m | TEB软代价范围 |
 | `enable_homotopy_class_planning` | false | 当前关闭多拓扑 |
+| `oscillation_timeout` | 20.0 s | move_base 允许原地调整和恢复的时间 |
+| `oscillation_distance` | 0.05 m | 平移超过该距离后重置振荡检测 |
+
+#### 10.3.1 有路径但车辆不走，重新下发目标后恢复
+
+若全局路径已经生成、目标仍为 ACTIVE，但一段时间后目标被终止，日志出现 `Robot is oscillating`，而重新下发同一目标后车辆恢复，通常是 move_base 的外层振荡判定过早触发。原地调头主要改变航向，平移量很小；旧参数要求车辆在 `5 s` 内平移 `0.20 m`，会在 TEB 完成原地调整前误判失败。
+
+同时打开以下两个文件：
+
+```bash
+nano ~/livox_fastlio/src/scout_navigation/config/move_base_teb.yaml
+nano ~/livox_fastlio/src/scout_navigation/config/move_base.yaml
+```
+
+两处统一设置：
+
+```yaml
+oscillation_timeout: 20.0
+oscillation_distance: 0.05
+```
+
+TEB 自身的振荡恢复周期约为 10 s，因此外层超时应大于该周期。修改 YAML 不需要重新编译；停止并重新启动导航后验证：
+
+```bash
+rosparam get /move_base/oscillation_timeout
+rosparam get /move_base/oscillation_distance
+rostopic echo /move_base/status
+rostopic hz /cmd_vel
+```
+
+期望运行值分别为 `20.0` 和 `0.05`。该修改只降低原地调头被误终止的概率，不用于掩盖无有效局部路径、定位跳变、障碍阻塞或底盘急停等故障。
 
 启动顺序：
 
@@ -812,9 +871,17 @@ sudo apt install -y ros-noetic-realsense2-camera ros-noetic-rosbag ros-noetic-rq
 恢复源码并解析ROS依赖：
 
 ```bash
+mkdir -p ~/github_upload
+cd ~/github_upload
+
+GIT_SSH_COMMAND="ssh -p 443 -i $HOME/.ssh/id_ed25519_github_aadcl -o IdentitiesOnly=yes -o Hostname=ssh.github.com" \
+  git clone git@github.com:BAIOLED/AADCL_UAV_UGV.git
+
 mkdir -p ~/livox_fastlio/src
+cp -a ~/github_upload/AADCL_UAV_UGV/Scout_mini/src/. ~/livox_fastlio/src/
+cp -a ~/github_upload/AADCL_UAV_UGV/Scout_mini/AGENTS.md ~/livox_fastlio/AGENTS.md
+
 cd ~/livox_fastlio
-# 将仓库中的src内容恢复到这里；不要把另一项目WheelTech混入本工作空间。
 source /opt/ros/noetic/setup.bash
 rosdep update
 rosdep install --from-paths src --ignore-src -r -y
@@ -1168,12 +1235,42 @@ roslaunch scout_navigation nav_logging.launch tag:=acceptance_test
 
 ## 18. 文档与版本管理
 
-每次功能修改同步更新：源码、开发文档、接口排错表、使用手册和`AGENTS.md`。
+每次Scout功能修改同步更新：源码、开发文档、接口排错表、使用手册和`AGENTS.md`。`~/livox_fastlio`是实车运行工作空间，不是Git仓库；提交前把验证通过的Scout文件同步到Git克隆的`Scout_mini/`，不要连同`build`、`devel`、地图或日志一起复制。
+
+建议先检查运行工作空间与Git克隆的差异，再按实际修改文件同步。下面命令仅示范Scout自研包和文档，执行前必须核对目标路径：
 
 ```bash
+WORKSPACE=~/livox_fastlio
+REPOSITORY=~/github_upload/AADCL_UAV_UGV
+
+cp -a "$WORKSPACE/src/scout_system_bringup" "$REPOSITORY/Scout_mini/src/"
+cp -a "$WORKSPACE/src/scout_tf_manager" "$REPOSITORY/Scout_mini/src/"
+cp -a "$WORKSPACE/src/scout_pointcloud_mapper" "$REPOSITORY/Scout_mini/src/"
+cp -a "$WORKSPACE/src/scout_map_tools" "$REPOSITORY/Scout_mini/src/"
+cp -a "$WORKSPACE/src/scout_cloud_adapter" "$REPOSITORY/Scout_mini/src/"
+cp -a "$WORKSPACE/src/scout_pose_adapter" "$REPOSITORY/Scout_mini/src/"
+cp -a "$WORKSPACE/src/scout_navigation" "$REPOSITORY/Scout_mini/src/"
+cp -a "$WORKSPACE/AGENTS.md" "$REPOSITORY/Scout_mini/AGENTS.md"
+cp -a "$WORKSPACE/docs/." "$REPOSITORY/Scout_mini/docs/"
+```
+
+然后只在Git克隆中检查、提交和推送：
+
+```bash
+cd ~/github_upload/AADCL_UAV_UGV
 git status --short
 git diff --check
 git diff --stat
+
+git add Scout_mini
+git diff --cached --check
+git diff --cached --stat
+git commit -m "说明Scout Mini本次修改内容"
+
+GIT_SSH_COMMAND="ssh -p 443 -i $HOME/.ssh/id_ed25519_github_aadcl -o IdentitiesOnly=yes -o Hostname=ssh.github.com" \
+  git push origin main
 ```
 
-仓库：`https://github.com/BAIOLED/AADCL_UAV_UGV.git`。禁止提交PCD、rosbag、build、devel、日志或密码。
+仓库：`https://github.com/BAIOLED/AADCL_UAV_UGV.git`。主分支为`main`。`Scout_mini/`和`WheelTech/`均属于该仓库，但提交Scout任务时只暂存`Scout_mini`相关路径，保留另一子项目同期提交并使用普通fetch/rebase，禁止强制覆盖远端。
+
+禁止提交PCD、rosbag、build、devel、日志、密码、Token或SSH私钥。完整认证配置见`Scout_mini/docs/GitHub_上传配置与安全说明_V3.0.md`。
