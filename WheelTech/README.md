@@ -6,6 +6,7 @@
 
 - 计算平台：NVIDIA Jetson NX，Ubuntu 20.04，ROS Noetic。
 - 雷达：Livox Mid-360，雷达地址 `192.168.1.165`，NX 有线地址 `192.168.1.5/24`。
+- RGB-D 相机：Orbbec Gemini 336L，USB 3.2；驱动、话题和 TF 见 `wheeltec_stack/CAMERA_ORBBEC336L_README.md`。
 - 底盘：四轮差速，外形尺寸约 `0.50 m × 0.40 m`。
 - 坐标系：右手系、前左上；`base_link -> body` 平移为前 `0.10 m`、上 `0.15 m`，Pitch 为 `+20°`。
 - 导航软件限制：前进 `0.35 m/s`、后退 `0.15 m/s`、角速度 `0.80 rad/s`；低于底盘资料物理上限。
@@ -44,6 +45,7 @@ WheelTech/
 
 - `livox_ros_driver2` 与 `Livox-SDK2`
 - `FAST_LIO`（ROS 包名为 `fast_lio`）
+- `OrbbecSDK_ROS1` `v2-main`（ROS 包名为 `orbbec_camera`，固定提交 `a2838b3`）
 - 轮趣原厂 `turn_on_wheeltec_robot` 和 `wheeltec_robot_rc`
 - ROS Noetic 的 `move_base`、`teb_local_planner`、PCL、NDT 等依赖
 
@@ -59,6 +61,14 @@ source devel/setup.bash
 ```
 
 Jetson NX 建议使用 `-j1`，避免 PCL、FAST-LIO 同时编译造成内存压力。
+
+## RGB-D 相机
+
+```bash
+roslaunch wheeltec_system_bringup wheeltec_orbbec336l.launch
+```
+
+该入口启动 Gemini 336L 的 RGB、深度、点云、相机内部 TF 和 `base_link -> camera_link` 安装 TF。正式安装外参为前 `0.16 m`、左 `0 m`、上 `0.08 m`，相机与车体同姿态，roll、pitch、yaw 均为 `0`。
 
 ## 建图
 

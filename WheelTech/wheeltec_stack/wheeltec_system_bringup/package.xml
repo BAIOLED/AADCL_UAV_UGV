@@ -51,6 +51,8 @@
   <buildtool_depend>catkin</buildtool_depend>
   <exec_depend>wheeltec_pointcloud_mapper</exec_depend>
   <exec_depend>wheeltec_map_tools</exec_depend>
+  <exec_depend>orbbec_camera</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
 
 
   <!-- The export tag contains other, unspecified, tags -->
